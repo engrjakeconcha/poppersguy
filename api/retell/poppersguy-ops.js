@@ -2208,7 +2208,7 @@ async function handleSubmitOrder(body) {
     tracking_number: "",
   };
 
-  if (order.delivery_method === "Lalamove" && order.payment_method === "Cash on Delivery" && quote.data?.lalamove) {
+  if (order.delivery_method === "Lalamove" && quote.data?.lalamove) {
     try {
       const lalamoveOrder = await placeCheckoutLalamoveOrder(quote.data, checkout, order.order_id);
       if (lalamoveOrder?.ok && lalamoveOrder.order_id) {
