@@ -869,6 +869,8 @@ async function handleBookLalamove(body, admin) {
         action: "book_lalamove",
         error_code: "LALAMOVE_BOOKING_FAILED",
         message: lalamoveOrder?.message || "Lalamove booking failed.",
+        provider_error: lalamoveOrder?.debug || "",
+        provider_response: lalamoveOrder?.data || null,
       };
     }
     updated.tracking_number = lalamoveOrder.order_id;
@@ -882,6 +884,8 @@ async function handleBookLalamove(body, admin) {
       action: "book_lalamove",
       error_code: "LALAMOVE_BOOKING_FAILED",
       message: error instanceof Error ? error.message : "Lalamove booking failed.",
+      provider_error: "",
+      provider_response: null,
     };
   }
 

@@ -1025,6 +1025,49 @@ function extractLalamoveErrorMessage(payload, status) {
   return `Lalamove request failed with status ${status}`;
 }
 
+function summarizeLalamoveErrorDetails(payload) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  const parts = [];
+  const rootCode = String(payload.code || payload.errorCode || "").trim();
+  const rootMessage = String(payload.message || payload.error || "").trim();
+  if (rootCode) {
+    parts.push(`code=${rootCode}`);
+  }
+  if (rootMessage) {
+    parts.push(`message=${rootMessage}`);
+  }
+  if (Array.isArray(payload.errors) && payload.errors.length) {
+    const errors = payload.errors
+      .map((entry) =>
+        [entry?.code, entry?.message, entry?.reason]
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+          .join(": ")
+      )
+      .filter(Boolean)
+      .join(" | ");
+    if (errors) {
+      parts.push(`errors=${errors}`);
+    }
+  }
+  if (payload.data && typeof payload.data === "object") {
+    const dataCode = String(payload.data.code || payload.data.errorCode || "").trim();
+    const dataMessage = String(
+      payload.data.message || payload.data.error || payload.data.reason || payload.data.errorMessage || ""
+    ).trim();
+    if (dataCode) {
+      parts.push(`data.code=${dataCode}`);
+    }
+    if (dataMessage) {
+      parts.push(`data.message=${dataMessage}`);
+    }
+  }
+  const summary = parts.join("; ");
+  return summary.slice(0, 800);
+}
+
 function parseOrderCreatedAt(order) {
   const timestamp = Date.parse(String(order.created_at || "").trim());
   return Number.isFinite(timestamp) ? timestamp : 0;
@@ -1908,6 +1951,7 @@ async function placeCheckoutLalamoveOrder(quote, checkout, orderId) {
       message: result.message || "Lalamove booking failed.",
       error_code: result.error_code || "LALAMOVE_BOOKING_FAILED",
       data: result.data,
+      debug: summarizeLalamoveErrorDetails(result.data),
     };
   }
   return {
