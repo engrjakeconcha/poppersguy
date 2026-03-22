@@ -2243,6 +2243,35 @@ async function syncLalamoveOrderRecord(order, rowNumber, options = {}) {
   const payload = details.data?.data || details.data || {};
   const liveStatus = String(payload.status || "").trim().toUpperCase();
   const liveTrackingLink = extractLalamoveTrackingLink(details.data);
+  const driverId = String(payload.driverId || "").trim();
+  let driver = null;
+  if (driverId) {
+    const driverResult = await handleLalamoveDriverDetails({
+      lalamove: {
+        market: "PH",
+        orderId: trackingNumber,
+        driverId,
+      },
+    }).catch(() => null);
+    const driverPayload = driverResult?.data?.data || driverResult?.data || null;
+    if (driverPayload) {
+      driver = {
+        id: driverId,
+        name: String(driverPayload.name || "").trim(),
+        phone: String(driverPayload.phone || "").trim(),
+        plate_number: String(driverPayload.plateNumber || "").trim(),
+        photo: String(driverPayload.photo || "").trim(),
+        coordinates:
+          driverPayload.coordinates?.lat && driverPayload.coordinates?.lng
+            ? {
+                lat: String(driverPayload.coordinates.lat),
+                lng: String(driverPayload.coordinates.lng),
+                updated_at: String(driverPayload.coordinates.updatedAt || "").trim(),
+              }
+            : null,
+      };
+    }
+  }
   const mappedStatus = mapLalamoveStatusToOrderStatus(liveStatus, current.status);
   const updated = {
     ...current,
@@ -2253,8 +2282,29 @@ async function syncLalamoveOrderRecord(order, rowNumber, options = {}) {
     status: liveStatus,
     status_label: formatLalamoveStatus(liveStatus),
     tracking_link: liveTrackingLink,
-    driver_id: String(payload.driverId || "").trim(),
+    driver_id: driverId,
     share_link: liveTrackingLink,
+    driver,
+    pickup:
+      payload.stops?.[0]?.coordinates?.lat && payload.stops?.[0]?.coordinates?.lng
+        ? {
+            coordinates: {
+              lat: String(payload.stops[0].coordinates.lat),
+              lng: String(payload.stops[0].coordinates.lng),
+            },
+            address: String(payload.stops?.[0]?.address || "").trim(),
+          }
+        : null,
+    recipient:
+      payload.stops?.[1]?.coordinates?.lat && payload.stops?.[1]?.coordinates?.lng
+        ? {
+            coordinates: {
+              lat: String(payload.stops[1].coordinates.lat),
+              lng: String(payload.stops[1].coordinates.lng),
+            },
+            address: String(payload.stops?.[1]?.address || "").trim(),
+          }
+        : null,
   };
 
   if (changed && rowNumber) {
@@ -2265,6 +2315,9 @@ async function syncLalamoveOrderRecord(order, rowNumber, options = {}) {
         `Order: ${updated.order_id}`,
         `Status: ${updated.status}`,
         lalamove.status_label ? `Lalamove Status: ${lalamove.status_label}` : "",
+        lalamove.driver?.name ? `Rider: ${lalamove.driver.name}` : "",
+        lalamove.driver?.phone ? `Rider Phone: ${lalamove.driver.phone}` : "",
+        lalamove.driver?.plate_number ? `Plate Number: ${lalamove.driver.plate_number}` : "",
         lalamove.tracking_link ? `Lalamove tracking: ${lalamove.tracking_link}` : "",
       ]
         .filter(Boolean)
@@ -2277,6 +2330,9 @@ async function syncLalamoveOrderRecord(order, rowNumber, options = {}) {
           `Order ${updated.order_id} update`,
           `Status: ${updated.status}`,
           lalamove.status_label ? `Rider status: ${lalamove.status_label}` : "",
+          lalamove.driver?.name ? `Rider: ${lalamove.driver.name}` : "",
+          lalamove.driver?.phone ? `Rider phone: ${lalamove.driver.phone}` : "",
+          lalamove.driver?.plate_number ? `Plate number: ${lalamove.driver.plate_number}` : "",
           lalamove.tracking_link ? `Live tracking: ${lalamove.tracking_link}` : "",
           `Track here: https://poppers.jcit.digital/poppers/track?order_id=${encodeURIComponent(String(updated.order_id || "").trim())}`,
         ]
@@ -3198,6 +3254,40 @@ async function handleLalamoveOrderDetails(body) {
   };
 }
 
+async function handleLalamoveDriverDetails(body) {
+  const market = String(body.lalamove?.market || "PH").trim().toUpperCase();
+  const orderId = String(body.lalamove?.orderId || "").trim();
+  const driverId = String(body.lalamove?.driverId || "").trim();
+  if (!orderId || !driverId) {
+    return {
+      ok: false,
+      action: "lalamove_driver_details",
+      message: "Lalamove orderId and driverId are required.",
+      error_code: "MISSING_LALAMOVE_DRIVER_CONTEXT",
+    };
+  }
+  const result = await callLalamove({
+    method: "GET",
+    path: `/v3/orders/${encodeURIComponent(orderId)}/drivers/${encodeURIComponent(driverId)}`,
+    market,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      action: "lalamove_driver_details",
+      message: result.message,
+      error_code: result.error_code || "LALAMOVE_API_ERROR",
+      data: result.data,
+    };
+  }
+  return {
+    ok: true,
+    action: "lalamove_driver_details",
+    message: "Lalamove driver details loaded successfully.",
+    data: result.data,
+  };
+}
+
 async function handleSendTelegram(body) {
   const telegram = body.telegram || {};
   if (!telegram.message) {
@@ -3333,6 +3423,9 @@ function createHandler(options = {}) {
       case "lalamove_order_details":
         result = await handleLalamoveOrderDetails(body);
         break;
+      case "lalamove_driver_details":
+        result = await handleLalamoveDriverDetails(body);
+        break;
       case "track_order":
         result = await handleTrackOrder(body, false);
         break;
@@ -3391,6 +3484,7 @@ module.exports.helpers = {
   getCheckoutLalamoveQuote,
   placeCheckoutLalamoveOrder,
   getLalamoveTrackingLink,
+  handleLalamoveDriverDetails,
   syncLalamoveOrderRecord,
   parsePhotoFileIds,
   telegramSendPhoto,

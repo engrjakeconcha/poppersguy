@@ -193,6 +193,16 @@ body.has-order-success {
   margin: 0 0 10px;
 }
 
+.tracking-map {
+  width: 100%;
+  min-height: 280px;
+  margin-top: 14px;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.92);
+}
+
 .page-shell {
   width: min(1180px, 100%);
   margin: 0 auto;

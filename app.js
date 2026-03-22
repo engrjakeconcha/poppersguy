@@ -1109,6 +1109,9 @@ async function submitStorefrontOrder(event) {
 
 async function loadTrackingView() {
   const statusNode = document.getElementById("tracking-status");
+  const riderNode = document.getElementById("tracking-rider");
+  const riderMetaNode = document.getElementById("tracking-rider-meta");
+  const mapNode = document.getElementById("tracking-map");
   const galleryNode = document.getElementById("tracking-gallery");
   const form = document.getElementById("tracking-form");
   const actionsNode = document.getElementById("tracking-actions");
@@ -1129,6 +1132,103 @@ async function loadTrackingView() {
   const telegramUser = getTelegramMiniAppUser();
   let currentTrackedOrder = null;
   let selectedSurveyRating = 0;
+  let pollingTimer = null;
+  let trackingMap = null;
+  let riderMarker = null;
+  let destinationMarker = null;
+  const ensureMap = () => {
+    if (!mapNode || !window.L) {
+      return null;
+    }
+    if (!trackingMap) {
+      trackingMap = window.L.map(mapNode, {
+        zoomControl: true,
+        attributionControl: true,
+      });
+      window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "&copy; OpenStreetMap contributors",
+      }).addTo(trackingMap);
+    }
+    return trackingMap;
+  };
+  const clearPolling = () => {
+    if (pollingTimer) {
+      window.clearTimeout(pollingTimer);
+      pollingTimer = null;
+    }
+  };
+  const schedulePolling = (lookup) => {
+    clearPolling();
+    if (!currentTrackedOrder?.tracking_number) {
+      return;
+    }
+    const currentStatus = String(currentTrackedOrder.status || "").trim();
+    if (["Completed", "Cancelled"].includes(currentStatus)) {
+      return;
+    }
+    pollingTimer = window.setTimeout(() => {
+      lookup().catch(() => null);
+    }, 30000);
+  };
+  const renderRiderPanel = (order) => {
+    if (!riderNode || !riderMetaNode || !mapNode) {
+      return;
+    }
+    const lalamove = order?.lalamove || null;
+    const driver = lalamove?.driver || null;
+    const riderCoords = driver?.coordinates || null;
+    const destinationCoords = lalamove?.recipient?.coordinates || null;
+    if (!lalamove || !driver) {
+      riderNode.hidden = true;
+      mapNode.hidden = true;
+      return;
+    }
+    riderNode.hidden = false;
+    riderMetaNode.innerHTML = `
+      <p><strong>Rider:</strong> ${driver.name || "-"}</p>
+      <p><strong>Phone:</strong> ${driver.phone || "-"}</p>
+      <p><strong>Plate Number:</strong> ${driver.plate_number || "-"}</p>
+      ${lalamove.status_label ? `<p><strong>Live Status:</strong> ${lalamove.status_label}</p>` : ""}
+      ${driver.coordinates?.updated_at ? `<p><strong>Last Updated:</strong> ${driver.coordinates.updated_at}</p>` : ""}
+    `;
+    if (!riderCoords?.lat || !riderCoords?.lng) {
+      mapNode.hidden = true;
+      return;
+    }
+    mapNode.hidden = false;
+    const map = ensureMap();
+    if (!map) {
+      return;
+    }
+    const riderLatLng = [Number(riderCoords.lat), Number(riderCoords.lng)];
+    if (!riderMarker) {
+      riderMarker = window.L.marker(riderLatLng).addTo(map);
+    } else {
+      riderMarker.setLatLng(riderLatLng);
+    }
+    riderMarker.bindPopup(`Rider: ${driver.name || "Lalamove Driver"}`);
+    const bounds = [riderLatLng];
+    if (destinationCoords?.lat && destinationCoords?.lng) {
+      const destinationLatLng = [Number(destinationCoords.lat), Number(destinationCoords.lng)];
+      if (!destinationMarker) {
+        destinationMarker = window.L.marker(destinationLatLng).addTo(map);
+      } else {
+        destinationMarker.setLatLng(destinationLatLng);
+      }
+      destinationMarker.bindPopup("Delivery destination");
+      bounds.push(destinationLatLng);
+    } else if (destinationMarker && map.hasLayer(destinationMarker)) {
+      map.removeLayer(destinationMarker);
+      destinationMarker = null;
+    }
+    map.invalidateSize();
+    if (bounds.length > 1) {
+      map.fitBounds(bounds, { padding: [30, 30] });
+    } else {
+      map.setView(riderLatLng, 14);
+    }
+  };
   const setSurveyFeedback = (message, tone = "") => {
     if (!surveyFeedback) {
       return;
@@ -1187,6 +1287,14 @@ async function loadTrackingView() {
           : ""
       }
     `;
+    renderRiderPanel(order);
+    schedulePolling(() =>
+      runLookup({
+        orderIdValue: String(form?.elements.order_id?.value || order.order_id || "").trim(),
+        usernameValue: String(form?.elements.telegram_username?.value || usernameParam || telegramUser?.username || "").trim().replace(/^@/, ""),
+        phoneValue: String(form?.elements.phone?.value || phoneParam || "").trim(),
+      })
+    );
     if (actionsNode) {
       const currentStatus = String(order.status || "").trim();
       const showActions = Boolean(order.order_id) && !["Cancelled", "Completed"].includes(currentStatus);
@@ -1326,6 +1434,7 @@ async function loadTrackingView() {
       phoneValue: phoneParam,
     });
   } catch (error) {
+    clearPolling();
     statusNode.textContent = error.message || "Could not load tracking right now.";
   }
 }
