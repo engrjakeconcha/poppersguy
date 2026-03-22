@@ -1467,15 +1467,40 @@ async function readPersistedCartSession(body, keys = getCartSessionKeys(body)) {
 
 async function fetchCatalog() {
   const url = process.env.POPPERS_CATALOG_URL || DEFAULT_CATALOG_URL;
-  const response = await fetch(url, {
-    headers: { Accept: "application/json" },
-  });
-  if (!response.ok) {
-    throw new Error(`Catalog request failed with status ${response.status}`);
+  try {
+    const response = await fetch(url, {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      throw new Error(`Catalog request failed with status ${response.status}`);
+    }
+    const payload = await response.json();
+    const products = Array.isArray(payload.products) ? payload.products : [];
+    const categories = Array.isArray(payload.categories) ? payload.categories : [];
+    if (products.length) {
+      return { products, categories };
+    }
+  } catch (_) {
+    // Fall back to the live Products sheet so checkout keeps working if the external catalog is down.
   }
-  const payload = await response.json();
-  const products = Array.isArray(payload.products) ? payload.products : [];
-  const categories = Array.isArray(payload.categories) ? payload.categories : [];
+
+  const rows = await getRecordRows("Products");
+  const records = mapSheetRows(rows);
+  const products = records
+    .map((record) => ({
+      sku: String(record.sku || "").trim(),
+      category: String(record.category || "").trim(),
+      name: String(record.name || "").trim(),
+      description: String(record.description || "").trim(),
+      price: parseMoney(record.price),
+      image_url: String(record.image_url || "").trim(),
+      active: normalizeActiveFlag(record.active),
+      stock: Number(record.stock || 0),
+    }))
+    .filter((product) => product.sku && product.active);
+  const categories = Array.from(
+    new Set(products.map((product) => String(product.category || "").trim()).filter(Boolean))
+  );
   return { products, categories };
 }
 
