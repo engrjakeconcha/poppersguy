@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>PoppersGuyPH Checkout</title>
+    <meta
+      name="description"
+      content="Complete your PoppersGuyPH order with delivery, payment, promo code, and payment proof upload."
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script>
+      (function () {
+        const CART_STORAGE_KEY = "poppers_catalog_cart";
+        const payload = { store: "poppers" };
+
+        try {
+          const raw = window.localStorage.getItem(CART_STORAGE_KEY);
+          const cart = raw ? JSON.parse(raw) : null;
+          const items = Array.isArray(cart?.items) ? cart.items : [];
+          if (cart?.cart_session_id) {
+            payload.cart_session_id = cart.cart_session_id;
+            payload.customer_id = cart.cart_session_id;
+          }
+          if (items.length) {
+            payload.cart_json = JSON.stringify(items);
+            payload.cart_items = items.map((item) => `${item.name || item.sku} x${item.qty}`).join(", ");
+            payload.cart_total = items.reduce(
+              (sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0),
+              0
+            );
+          }
+        } catch (_) {
+          // Ignore local storage parsing failures and continue without cart handoff.
+        }
+
+        const widget = document.createElement("script");
+        widget.id = "retell-widget";
+        widget.src = "https://dashboard.retellai.com/retell-widget.js";
+        widget.type = "module";
+        widget.dataset.publicKey = "public_key_b16031bf6fd0c0d9f2be9";
+        widget.dataset.agentId = "agent_75c854665db40f81ec86c5ba82";
+        widget.dataset.agentVersion = "21";
+        widget.dataset.title = "PoppersGuyPH Concierge";
+        widget.dataset.logoUrl =
+          "https://raw.githubusercontent.com/jcitservices-ai/delulubes/main/poppersguyph/assets/pgphlogo.png";
+        widget.dataset.color = "#f4c542";
+        widget.dataset.botName = "PoppersGuyPH Concierge";
+        widget.dataset.popupMessage = "Need support or order follow-up?";
+        widget.dataset.showAiPopup = "false";
+        widget.dataset.autoOpen = "false";
+        widget.dataset.dynamic = JSON.stringify(payload);
+        document.head.appendChild(widget);
+      })();
+    </script>
+  </head>
+  <body data-page="checkout">
+    <div class="page-shell">
+      <header class="hero hero--checkout">
+        <div class="hero__glow"></div>
+        <div class="hero__copy">
+          <p class="eyebrow" id="store-badge">Checkout</p>
+          <h1 id="store-title">Loading checkout…</h1>
+          <p id="store-description" class="hero__description">
+            Preparing your order form.
+          </p>
+          <div class="hero__actions">
+            <button id="back-to-catalog" class="cta cta--secondary" type="button">Back to Catalog</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="catalog">
+        <section class="checkout-shell" id="checkout-shell">
+          <div class="checkout-shell__summary">
+            <div class="checkout-shell__head">
+              <p class="eyebrow">Your Cart</p>
+              <h2>Review Items</h2>
+            </div>
+            <div id="cart-empty" class="empty-state">Add items from the catalog to start your order.</div>
+            <div id="cart-list" class="cart-list"></div>
+            <div id="cart-totals" class="cart-totals" hidden></div>
+          </div>
+          <form id="checkout-form" class="checkout-form">
+            <div class="checkout-shell__head">
+              <p class="eyebrow">Delivery & Payment</p>
+              <h2>Complete Order</h2>
+            </div>
+            <div class="form-grid">
+              <label class="field">
+                <span>Full Name</span>
+                <input name="delivery_name" type="text" required />
+              </label>
+              <label class="field" id="telegram-field-wrap">
+                <span id="telegram-field-label">Telegram ID or Username</span>
+                <input name="telegram_id" type="text" placeholder="@username or numeric ID" />
+                <small class="field-hint" id="telegram-field-hint">In Telegram, this auto-fills from your mini app account.</small>
+              </label>
+              <label class="field">
+                <span>Delivery Area</span>
+                <select name="delivery_area" required>
+                  <option value="Metro Manila">Metro Manila</option>
+                  <option value="Outside Metro Manila">Outside Metro Manila</option>
+                </select>
+              </label>
+              <label class="field">
+                <span id="delivery-contact-label">Contact Number</span>
+                <input name="delivery_contact" type="text" required />
+                <small class="field-hint" id="delivery-contact-hint">Use a number we can reach for delivery updates.</small>
+              </label>
+            </div>
+            <label class="field">
+              <span>Delivery Address</span>
+              <textarea name="delivery_address" rows="3" required></textarea>
+              <small class="field-hint" id="delivery-address-feedback">We’ll verify this address before final checkout.</small>
+              <button id="open-address-page" class="cta cta--secondary cta--inline" type="button">Open Address Page</button>
+            </label>
+            <div class="form-grid">
+              <label class="field">
+                <span>Promo Code</span>
+                <div class="field-inline">
+                  <input name="promo_code" type="text" placeholder="Enter code or leave blank" />
+                  <button class="cta cta--secondary" id="apply-promo" type="button">Apply</button>
+                </div>
+              </label>
+              <label class="field">
+                <span>Referral Code</span>
+                <input name="referral_code" type="text" placeholder="Friend's referral code (optional)" />
+              </label>
+            </div>
+            <div class="form-grid">
+              <label class="field">
+                <span>Payment Method</span>
+                <select name="payment_method" required>
+                  <option value="E-Wallet">E-Wallet</option>
+                  <option value="Bank Transfer">Bank Transfer</option>
+                  <option value="Cash on Delivery">Cash on Delivery</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Delivery Method</span>
+                <select name="delivery_method">
+                  <option value="Lalamove">Same-day Lalamove</option>
+                  <option value="Standard">Standard</option>
+                </select>
+              </label>
+            </div>
+            <div class="payment-proof" id="payment-proof-wrap">
+              <label class="field">
+                <span>Payment Screenshot</span>
+                <input id="payment-proof" name="payment_proof" type="file" accept="image/*" />
+              </label>
+              <p class="field-hint">Required for E-Wallet and Bank Transfer. The screenshot will be forwarded to the admin team.</p>
+            </div>
+            <section class="payment-guide" aria-label="Payment instructions">
+              <div class="payment-guide__head">
+                <p class="eyebrow">Payment Instructions</p>
+                <h3>Pay here before submitting prepaid orders</h3>
+              </div>
+              <div class="payment-guide__grid">
+                <article class="payment-card">
+                  <p class="payment-card__label">GCash</p>
+                  <strong>09088960308</strong>
+                  <span>Jo***a B.</span>
+                </article>
+                <article class="payment-card">
+                  <p class="payment-card__label">Maya</p>
+                  <strong>09959850349</strong>
+                  <span>Joshua Banta</span>
+                </article>
+                <article class="payment-card">
+                  <p class="payment-card__label">Bank Transfer</p>
+                  <strong>Gotyme</strong>
+                  <span>016301929833</span>
+                  <span>Joshua Banta</span>
+                </article>
+              </div>
+              <p class="field-hint">
+                For E-Wallet and Bank Transfer, upload your payment screenshot before placing the order. Same-day Lalamove is charged inside the final bill, so there is no separate rider payment for prepaid orders. Cash on Delivery adds PHP 50 and is the only same-day option where payment is collected on delivery.
+              </p>
+            </section>
+            <div class="checkout-actions">
+              <button class="cta cta--secondary" id="refresh-quote" type="button">Refresh Total</button>
+              <button class="cta cta--primary" id="submit-order" type="submit">Place Order</button>
+            </div>
+            <div id="checkout-feedback" class="checkout-feedback" aria-live="polite"></div>
+          </form>
+        </section>
+      </main>
+
+      <footer class="site-credit">
+        <p>
+          JCIT Ordering App version 2.0. Ordering bot made by JCIT Services. If you would like the same service contact
+          <a href="https://t.me/siJayco" target="_blank" rel="noreferrer">t.me/siJayco</a>
+          or check
+          <a href="https://jcit.digital" target="_blank" rel="noreferrer">jcit.digital</a>.
+        </p>
+      </footer>
+    </div>
+
+    <div class="order-success" id="order-success" hidden>
+      <div class="order-success__backdrop" data-order-success-close></div>
+      <div class="order-success__card" role="dialog" aria-modal="true" aria-labelledby="order-success-title">
+        <p class="order-success__eyebrow">Order placed</p>
+        <h2 id="order-success-title">Your order is confirmed</h2>
+        <p class="order-success__copy">
+          Order number: <strong id="order-success-number">-</strong>
+        </p>
+        <div class="order-success__referral">
+          <p class="order-success__copy">Refer a friend with code: <strong id="own-referral-code">PGPH-000000</strong></p>
+          <button id="copy-referral" class="cta cta--secondary" type="button">Copy Referral Code</button>
+        </div>
+        <a id="order-success-track-link" class="cta cta--primary" href="/poppers/track">Track Order</a>
+        <button class="cta cta--secondary" type="button" data-order-success-close>Continue shopping</button>
+      </div>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

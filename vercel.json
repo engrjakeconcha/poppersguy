@@ -17,6 +17,12 @@
       "destination": "/poppers/index.html"
     },
     { "source": "/delu", "destination": "/delu/index.html" },
-    { "source": "/poppers", "destination": "/poppers/index.html" }
+    { "source": "/admin", "destination": "/admin/index.html" },
+    { "source": "/poppers", "destination": "/poppers/index.html" },
+    { "source": "/sales-app-2", "destination": "/sales-app-2/index.html" },
+    { "source": "/salesbot", "destination": "/sales-app-2/index.html" },
+    { "source": "/poppers/address", "destination": "/poppers/address/index.html" },
+    { "source": "/poppers/checkout", "destination": "/poppers/checkout/index.html" },
+    { "source": "/poppers/track", "destination": "/poppers/track/index.html" }
   ]
 }

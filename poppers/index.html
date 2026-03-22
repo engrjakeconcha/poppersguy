@@ -10,23 +10,51 @@
     />
     <link rel="stylesheet" href="/styles.css" />
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script
-      id="retell-widget"
-      src="https://dashboard.retellai.com/retell-widget.js"
-      type="module"
-      data-public-key="public_key_b16031bf6fd0c0d9f2be9"
-      data-agent-id="agent_75c854665db40f81ec86c5ba82"
-      data-agent-version="15"
-      data-title="PoppersGuyPH Concierge"
-      data-logo-url="https://raw.githubusercontent.com/jcitservices-ai/delulubes/main/poppersguyph/assets/pgphlogo.png"
-      data-color="#c81d39"
-      data-bot-name="PoppersGuyPH Concierge"
-      data-popup-message="Ask about products, promo codes, or same-day delivery."
-      data-show-ai-popup="true"
-      data-show-ai-popup-time="5"
-      data-auto-open="false"
-    ></script>
     <script>
+      (function () {
+        const CART_STORAGE_KEY = "poppers_catalog_cart";
+        const payload = { store: "poppers" };
+
+        try {
+          const raw = window.localStorage.getItem(CART_STORAGE_KEY);
+          const cart = raw ? JSON.parse(raw) : null;
+          const items = Array.isArray(cart?.items) ? cart.items : [];
+          if (cart?.cart_session_id) {
+            payload.cart_session_id = cart.cart_session_id;
+            payload.customer_id = cart.cart_session_id;
+          }
+          if (items.length) {
+            payload.cart_json = JSON.stringify(items);
+            payload.cart_items = items.map((item) => `${item.name || item.sku} x${item.qty}`).join(", ");
+            payload.cart_total = items.reduce(
+              (sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0),
+              0
+            );
+          }
+        } catch (_) {
+          // Ignore local storage parsing failures and continue without cart handoff.
+        }
+
+        const logoUrl = "https://github.com/jcitservices-ai/poppersguyph/blob/images/logo.jpg?raw=true";
+        const widget = document.createElement("script");
+        widget.id = "retell-widget";
+        widget.src = "https://dashboard.retellai.com/retell-widget.js";
+        widget.type = "module";
+        widget.dataset.publicKey = "public_key_b16031bf6fd0c0d9f2be9";
+        widget.dataset.agentId = "agent_75c854665db40f81ec86c5ba82";
+        widget.dataset.agentVersion = "21";
+        widget.dataset.title = "PoppersGuyPH Concierge";
+        widget.dataset.logoUrl = logoUrl;
+        widget.dataset.color = "#f4c542";
+        widget.dataset.botName = "PoppersGuyPH Concierge";
+        widget.dataset.popupMessage = "Ask about products, promo codes, or same-day delivery.";
+        widget.dataset.showAiPopup = "true";
+        widget.dataset.showAiPopupTime = "5";
+        widget.dataset.autoOpen = "false";
+        widget.dataset.dynamic = JSON.stringify(payload);
+        document.head.appendChild(widget);
+      })();
+
       (function () {
         const params = new URLSearchParams(window.location.search);
         if (params.get("open_chat") !== "1") {
@@ -48,27 +76,50 @@
       })();
     </script>
   </head>
-  <body>
+  <body data-page="catalog">
+    <div class="miniapp-guide" id="miniapp-guide" hidden>
+      <div class="miniapp-guide__backdrop" data-guide-close></div>
+      <div class="miniapp-guide__card" role="dialog" aria-modal="true" aria-labelledby="miniapp-guide-title">
+        <p class="miniapp-guide__eyebrow">Quick Start</p>
+        <h2 id="miniapp-guide-title">How to order</h2>
+        <ol class="miniapp-guide__steps">
+          <li>Search for the product</li>
+          <li>Add to cart</li>
+          <li>Checkout</li>
+          <li>Chat for any question</li>
+        </ol>
+        <button class="cta cta--primary miniapp-guide__button" type="button" data-guide-close>Got it</button>
+      </div>
+    </div>
+
     <div class="page-shell">
       <header class="hero">
         <div class="hero__glow"></div>
         <div class="hero__copy">
           <p class="eyebrow" id="store-badge">Store Catalog</p>
-          <h1 id="store-title">Loading catalog…</h1>
-          <p id="store-description" class="hero__description">
-            Pulling the latest items from the store.
-          </p>
-          <div class="hero__meta">
-            <span id="product-count" class="pill">0 items</span>
-            <span id="category-count" class="pill pill--ghost">0 categories</span>
+          <div class="hero__brand">
+            <img class="hero__logo" src="https://github.com/jcitservices-ai/poppersguyph/blob/images/logo.jpg?raw=true" alt="PoppersGuyPH logo" />
+            <h1 id="store-title">Loading catalog…</h1>
           </div>
+          <p id="store-description" class="hero__description">Browse and order in a few taps.</p>
           <div class="hero__actions">
             <button id="copy-link" class="cta cta--secondary" type="button">Copy Store Link</button>
+            <button id="go-track" class="cta cta--secondary" type="button">Track Order</button>
+            <button id="go-admin" class="cta cta--secondary" type="button">Admin</button>
+            <button id="go-checkout" class="cta cta--primary" type="button">Go to Checkout</button>
+            <button id="cart-button" class="cart-button" type="button" data-go-checkout aria-label="Open cart and checkout">
+              <span class="cart-button__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                  <path d="M8 18a2 2 0 1 0 0 4a2 2 0 0 0 0-4Zm9 0a2 2 0 1 0 0 4a2 2 0 0 0 0-4ZM6.2 6l.4 2H20a1 1 0 0 1 .97 1.24l-1.2 5A2 2 0 0 1 17.83 16H9a2 2 0 0 1-1.96-1.61L5.16 4.5A1 1 0 0 0 4.18 4H2.5a1 1 0 1 1 0-2h1.68a3 3 0 0 1 2.94 2.36L7.2 4H21a1 1 0 1 1 0 2H6.2Z"/>
+                </svg>
+              </span>
+              <span class="cart-button__count" id="cart-count">0</span>
+            </button>
           </div>
           <div class="chat-status">
             <span class="pill pill--ghost">Live chat enabled</span>
             <p class="chat-status__copy">
-              Use the chat bubble to ask questions, place orders, or request delivery help.
+              Use the chat bubble for support, questions, and order follow-up.
             </p>
           </div>
         </div>
@@ -85,6 +136,15 @@
 
         <section class="catalog-grid" id="product-grid" aria-live="polite"></section>
       </main>
+
+      <footer class="site-credit">
+        <p>
+          JCIT Ordering App version 2.0. Ordering bot made by JCIT Services. If you would like the same service contact
+          <a href="https://t.me/siJayco" target="_blank" rel="noreferrer">t.me/siJayco</a>
+          or check
+          <a href="https://jcit.digital" target="_blank" rel="noreferrer">jcit.digital</a>.
+        </p>
+      </footer>
     </div>
 
     <template id="product-card-template">
@@ -95,13 +155,12 @@
         <div class="product-card__body">
           <div class="product-card__head">
             <p class="product-card__category"></p>
-            <span class="product-card__stock"></span>
           </div>
           <h2 class="product-card__title"></h2>
           <p class="product-card__description"></p>
           <div class="product-card__footer">
             <strong class="product-card__price"></strong>
-            <button class="product-card__button" type="button">Checkout with AI</button>
+            <button class="product-card__button" type="button">Add to Cart</button>
           </div>
         </div>
       </article>

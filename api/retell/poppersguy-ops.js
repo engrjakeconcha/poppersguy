@@ -1,8 +1,12 @@
 "use strict";
 
 const { createHmac, createSign, randomUUID } = require("node:crypto");
+const net = require("node:net");
+const tls = require("node:tls");
 
 const DEFAULT_CATALOG_URL = "https://jakeconcha.pythonanywhere.com/api/catalog/poppers";
+const DEFAULT_CART_SESSION_API_URL = "";
+const DEFAULT_REDIS_URL = "";
 const LALAMOVE_SANDBOX_BASE = "https://rest.sandbox.lalamove.com";
 const DEFAULT_GSHEET_ID = "1_OQ3tiHzb0jFrkcg2mwDz-prVLDa-ef5GUijqJwcD_I";
 const ORDER_HEADERS = [
@@ -21,9 +25,12 @@ const ORDER_HEADERS = [
   "delivery_contact",
   "delivery_area",
   "payment_method",
+  "delivery_method",
+  "referral_code",
   "payment_proof_file_id",
   "status",
   "tracking_number",
+  "order_photo_file_ids",
 ];
 const USER_HEADERS = [
   "user_id",
@@ -36,6 +43,38 @@ const USER_HEADERS = [
   "updated_at",
 ];
 const TICKET_HEADERS = ["ticket_id", "created_at", "type", "user_id", "username", "message", "status"];
+const PROMO_HEADERS = ["code", "discount", "active"];
+const PRODUCT_HEADERS = ["sku", "category", "name", "description", "price", "image_url", "active", "stock"];
+const ADMIN_USER_HEADERS = [
+  "username",
+  "passcode",
+  "telegram_id",
+  "telegram_username",
+  "active",
+  "updated_at",
+  "created_by",
+];
+const REWARD_HEADERS = [
+  "event_id",
+  "created_at",
+  "user_id",
+  "username",
+  "order_id",
+  "type",
+  "points_delta",
+  "message",
+  "meta_json",
+];
+const SURVEY_HEADERS = [
+  "survey_id",
+  "created_at",
+  "order_id",
+  "user_id",
+  "username",
+  "rating",
+  "comment",
+  "source",
+];
 const AFFILIATE_HEADERS = [
   "created_at",
   "user_id",
@@ -45,6 +84,7 @@ const AFFILIATE_HEADERS = [
   "contact",
   "subscriber_count",
 ];
+const CART_SESSION_HEADERS = ["session_key", "items_json", "updated_at"];
 const DEFAULT_SERVICE_ACCOUNT_INFO = {
   type: "service_account",
   project_id: "delulubes-bot-projec",
@@ -61,7 +101,35 @@ const LOYALTY_REDEEM_POINTS = 1000;
 const LOYALTY_REDEEM_VALUE = 100;
 const LOYALTY_POINTS_PER_ORDER = 10;
 const REFERRAL_SUCCESS_POINTS = 50;
+const REWARD_COMPLETION_STATUSES = new Set(["Delivered", "Completed", "Received"]);
 const PROMO_CACHE_TTL_MS = 5 * 60 * 1000;
+const ADMIN_PORTAL_URL = "https://poppers.jcit.digital/admin";
+const DEFAULT_LALAMOVE_SERVICE_TYPE = "MOTORCYCLE";
+const DEFAULT_LALAMOVE_PICKUP_ADDRESS = "Santol St 1372, 1448 Valenzuela, Philippines";
+const DEFAULT_LALAMOVE_PICKUP_LAT = "14.7060176";
+const DEFAULT_LALAMOVE_PICKUP_LNG = "120.9630606";
+const DEFAULT_LALAMOVE_PICKUP_NAME = "Jay Concha";
+const DEFAULT_LALAMOVE_PICKUP_PHONE = "09696104046";
+const LALAMOVE_PICKUP_POINTS = {
+  jay: {
+    id: "jay",
+    label: "Jay Concha",
+    address: DEFAULT_LALAMOVE_PICKUP_ADDRESS,
+    lat: DEFAULT_LALAMOVE_PICKUP_LAT,
+    lng: DEFAULT_LALAMOVE_PICKUP_LNG,
+    name: DEFAULT_LALAMOVE_PICKUP_NAME,
+    phone: DEFAULT_LALAMOVE_PICKUP_PHONE,
+  },
+  josh: {
+    id: "josh",
+    label: "Josh",
+    address: "Vine Residences, Quezon City, Philippines",
+    lat: "",
+    lng: "",
+    name: "Josh",
+    phone: DEFAULT_LALAMOVE_PICKUP_PHONE,
+  },
+};
 
 let promoCache = {
   expiresAt: 0,
@@ -69,8 +137,6 @@ let promoCache = {
 };
 const CART_SESSION_TTL_MS = 30 * 60 * 1000;
 const cartSessions = new Map();
-let latestCartSession = null;
-
 function sendJson(res, status, body) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body));
@@ -104,6 +170,148 @@ function base64UrlEncode(input) {
 
 function getGoogleServiceAccountInfo() {
   return parseJsonEnv("GOOGLE_SERVICE_ACCOUNT_INFO", DEFAULT_SERVICE_ACCOUNT_INFO);
+}
+
+function getRedisUrl() {
+  return String(process.env.POPPERS_CART_REDIS_URL || process.env.REDIS_URL || DEFAULT_REDIS_URL).trim();
+}
+
+function encodeRedisCommand(parts) {
+  return (
+    `*${parts.length}\r\n` +
+    parts
+      .map((part) => {
+        const value = String(part ?? "");
+        return `$${Buffer.byteLength(value)}\r\n${value}\r\n`;
+      })
+      .join("")
+  );
+}
+
+async function readRedisResponse(socket) {
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    function cleanup() {
+      socket.off("data", onData);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    }
+    function onError(error) {
+      cleanup();
+      reject(error);
+    }
+    function onClose() {
+      cleanup();
+      reject(new Error("Redis socket closed unexpectedly"));
+    }
+    function onData(chunk) {
+      buffer += chunk.toString("utf8");
+      if (!buffer.includes("\r\n")) {
+        return;
+      }
+      const type = buffer[0];
+      const lineEnd = buffer.indexOf("\r\n");
+      const line = buffer.slice(1, lineEnd);
+      if (type === "+" || type === "-" || type === ":" || type === "_") {
+        cleanup();
+        if (type === "-") {
+          reject(new Error(line));
+          return;
+        }
+        resolve(type === ":" ? Number(line) : line);
+        return;
+      }
+      if (type === "$") {
+        const length = Number(line);
+        if (length === -1) {
+          cleanup();
+          resolve(null);
+          return;
+        }
+        const totalLength = lineEnd + 2 + length + 2;
+        if (buffer.length < totalLength) {
+          return;
+        }
+        const payload = buffer.slice(lineEnd + 2, lineEnd + 2 + length);
+        cleanup();
+        resolve(payload);
+      }
+    }
+    socket.on("data", onData);
+    socket.on("error", onError);
+    socket.on("close", onClose);
+  });
+}
+
+async function withRedisConnection(callback) {
+  const redisUrl = getRedisUrl();
+  if (!redisUrl) {
+    return null;
+  }
+  const parsed = new URL(redisUrl);
+  const isTls = parsed.protocol === "rediss:";
+  const port = Number(parsed.port || (isTls ? 6380 : 6379));
+  const host = parsed.hostname;
+  const username = decodeURIComponent(parsed.username || "default");
+  const password = decodeURIComponent(parsed.password || "");
+
+  const socket = await new Promise((resolve, reject) => {
+    const client = isTls
+      ? tls.connect({ host, port, servername: host })
+      : net.createConnection({ host, port });
+    const onError = (error) => {
+      client.destroy();
+      reject(error);
+    };
+    client.once("error", onError);
+    client.once("connect", () => {
+      client.off("error", onError);
+      resolve(client);
+    });
+  });
+
+  async function command(parts) {
+    socket.write(encodeRedisCommand(parts));
+    return readRedisResponse(socket);
+  }
+
+  try {
+    if (password) {
+      await command(["AUTH", username, password]);
+    }
+    const result = await callback(command);
+    socket.end();
+    return result;
+  } catch (error) {
+    socket.destroy();
+    throw error;
+  }
+}
+
+async function persistCartSessionToRedis(sessionKey, items) {
+  if (!sessionKey || !getRedisUrl()) {
+    return false;
+  }
+  const payload = JSON.stringify(items || []);
+  const ttlSeconds = Math.floor(CART_SESSION_TTL_MS / 1000);
+  await withRedisConnection((command) => command(["SETEX", sessionKey, String(ttlSeconds), payload]));
+  return true;
+}
+
+async function readCartSessionFromRedis(sessionKey) {
+  if (!sessionKey || !getRedisUrl()) {
+    return [];
+  }
+  const payload = await withRedisConnection((command) => command(["GET", sessionKey]));
+  if (!payload) {
+    return [];
+  }
+  try {
+    const items = JSON.parse(String(payload || "[]"));
+    return Array.isArray(items) ? items : [];
+  } catch (_) {
+    return [];
+  }
 }
 
 async function getGoogleAccessToken() {
@@ -211,7 +419,115 @@ async function callGoogleSheets(path, { method = "GET", body } = {}) {
   return payload;
 }
 
-async function appendSheetRow(sheetName, rowValues) {
+async function ensureSheetExists(sheetName, headers) {
+  try {
+    await callGoogleSheets("", { method: "GET" });
+  } catch (_) {
+    return;
+  }
+
+  const spreadsheetId = String(process.env.GSHEET_ID || DEFAULT_GSHEET_ID).trim();
+  const accessToken = await getGoogleAccessToken();
+  const metaResponse = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+    },
+  });
+  const metaPayload = await metaResponse.json();
+  if (!metaResponse.ok) {
+    throw new Error(metaPayload.error?.message || "Failed to inspect spreadsheet");
+  }
+  const exists = Array.isArray(metaPayload.sheets)
+    ? metaPayload.sheets.some((sheet) => String(sheet.properties?.title || "").trim() === sheetName)
+    : false;
+  if (exists) {
+    return;
+  }
+
+  const addResponse = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      requests: [{ addSheet: { properties: { title: sheetName } } }],
+    }),
+  });
+  const addPayload = await addResponse.json();
+  if (!addResponse.ok) {
+    throw new Error(addPayload.error?.message || `Failed to create sheet ${sheetName}`);
+  }
+
+  if (Array.isArray(headers) && headers.length) {
+    const range = encodeURIComponent(`${sheetName}!A1`);
+    await callGoogleSheets(`/values/${range}?valueInputOption=USER_ENTERED`, {
+      method: "PUT",
+      body: { majorDimension: "ROWS", values: [headers] },
+    });
+  }
+}
+
+function getSheetHeaders(sheetName) {
+  if (sheetName === "Orders") {
+    return ORDER_HEADERS;
+  }
+  if (sheetName === "Users") {
+    return USER_HEADERS;
+  }
+  if (sheetName === "Tickets") {
+    return TICKET_HEADERS;
+  }
+  if (sheetName === "Promos") {
+    return PROMO_HEADERS;
+  }
+  if (sheetName === "Products") {
+    return PRODUCT_HEADERS;
+  }
+  if (sheetName === "AdminUsers") {
+    return ADMIN_USER_HEADERS;
+  }
+  if (sheetName === "Rewards") {
+    return REWARD_HEADERS;
+  }
+  if (sheetName === "Surveys") {
+    return SURVEY_HEADERS;
+  }
+  if (sheetName === "Affiliates") {
+    return AFFILIATE_HEADERS;
+  }
+  if (sheetName === "CartSessions") {
+    return CART_SESSION_HEADERS;
+  }
+  return null;
+}
+
+async function ensureSheetHeaders(sheetName) {
+  const headers = getSheetHeaders(sheetName);
+  if (!headers || !headers.length) {
+    return;
+  }
+  await ensureSheetExists(sheetName, headers);
+  const range = encodeURIComponent(`${sheetName}!A1:Z1`);
+  const payload = await callGoogleSheets(`/values/${range}`).catch(() => ({ values: [] }));
+  const current = Array.isArray(payload.values?.[0]) ? payload.values[0].map((value) => String(value || "").trim()) : [];
+  const needsUpdate =
+    headers.length !== current.length || headers.some((header, index) => String(current[index] || "").trim() !== header);
+  if (!needsUpdate) {
+    return;
+  }
+  const startRange = encodeURIComponent(`${sheetName}!A1`);
+  await callGoogleSheets(`/values/${startRange}?valueInputOption=USER_ENTERED`, {
+    method: "PUT",
+    body: { majorDimension: "ROWS", values: [headers] },
+  });
+}
+
+// Google Sheets helpers are only for durable business records and fallbacks.
+async function appendRecordRow(sheetName, rowValues) {
+  await ensureSheetHeaders(sheetName);
   const range = encodeURIComponent(`${sheetName}!A1`);
   return callGoogleSheets(`/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
     method: "POST",
@@ -219,13 +535,15 @@ async function appendSheetRow(sheetName, rowValues) {
   });
 }
 
-async function getSheetValues(sheetName) {
+async function getRecordRows(sheetName) {
+  await ensureSheetHeaders(sheetName);
   const range = encodeURIComponent(`${sheetName}!A:Z`);
   const payload = await callGoogleSheets(`/values/${range}`);
   return Array.isArray(payload.values) ? payload.values : [];
 }
 
-async function updateSheetRow(sheetName, rowNumber, rowValues) {
+async function updateRecordRow(sheetName, rowNumber, rowValues) {
+  await ensureSheetHeaders(sheetName);
   const endColumn = String.fromCharCode(64 + rowValues.length);
   const range = encodeURIComponent(`${sheetName}!A${rowNumber}:${endColumn}${rowNumber}`);
   return callGoogleSheets(`/values/${range}?valueInputOption=USER_ENTERED`, {
@@ -248,6 +566,49 @@ function mapSheetRows(rows) {
     });
 }
 
+const KNOWN_DELIVERY_METHODS = new Set(["Standard", "Lalamove"]);
+const KNOWN_ORDER_STATUSES = new Set([
+  "Pending",
+  "Pending Confirmation",
+  "Awaiting Payment Verification",
+  "Confirmed",
+  "Preparing",
+  "Out for Delivery",
+  "Delivered",
+  "Cancelled",
+  "Completed",
+  "Received",
+  "Shipped",
+]);
+
+function looksLikeUrl(value) {
+  return /^https?:\/\//i.test(String(value || "").trim());
+}
+
+function isLikelyTelegramFileId(value) {
+  return /^(AgAC|CQAC|DQAC|BQAC|AAMCA)/.test(String(value || "").trim());
+}
+
+function normalizeLegacyOrderRecord(record) {
+  const rawDeliveryMethod = String(record.delivery_method || "").trim();
+  if (!rawDeliveryMethod || KNOWN_DELIVERY_METHODS.has(rawDeliveryMethod)) {
+    return record;
+  }
+  return {
+    ...record,
+    delivery_method: "Standard",
+    referral_code:
+      !looksLikeUrl(rawDeliveryMethod) &&
+      !KNOWN_ORDER_STATUSES.has(rawDeliveryMethod) &&
+      !isLikelyTelegramFileId(rawDeliveryMethod)
+        ? rawDeliveryMethod
+        : "",
+    payment_proof_file_id: String(record.referral_code || "").trim(),
+    status: String(record.payment_proof_file_id || "").trim(),
+    tracking_number: String(record.status || "").trim(),
+  };
+}
+
 function normalizePromoCode(code) {
   return String(code || "").trim().toUpperCase();
 }
@@ -258,6 +619,134 @@ function nowIso() {
 
 function compactJsonStringify(value) {
   return JSON.stringify(value == null ? {} : value);
+}
+
+function firstNonEmptyString(...values) {
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function getNestedValue(source, path) {
+  let current = source;
+  for (const key of path) {
+    if (!current || typeof current !== "object" || !(key in current)) {
+      return "";
+    }
+    current = current[key];
+  }
+  return current;
+}
+
+function collectRetellDynamicContext(rawBody, body) {
+  const candidates = [
+    body?.dynamic,
+    body?.metadata,
+    body?.customer,
+    rawBody?.dynamic,
+    rawBody?.metadata,
+    rawBody?.customer,
+    rawBody?.args?.dynamic,
+    rawBody?.args?.metadata,
+    rawBody?.args?.customer,
+    rawBody?.call?.metadata,
+    rawBody?.call?.dynamic_variables,
+    rawBody?.call?.retell_llm_dynamic_variables,
+    rawBody?.call?.retell_llm_dynamic_variable_values,
+    rawBody?.call?.variables,
+    rawBody?._retell?.call?.metadata,
+    rawBody?._retell?.call?.dynamic_variables,
+    rawBody?._retell?.call?.retell_llm_dynamic_variables,
+    rawBody?._retell?.call?.retell_llm_dynamic_variable_values,
+  ].filter((value) => value && typeof value === "object");
+
+  const merged = {};
+  for (const candidate of candidates) {
+    Object.assign(merged, candidate);
+  }
+
+  const nestedUserCandidates = [
+    getNestedValue(rawBody, ["call", "metadata", "telegram_user"]),
+    getNestedValue(rawBody, ["call", "metadata", "user"]),
+    getNestedValue(rawBody, ["args", "metadata", "telegram_user"]),
+    getNestedValue(rawBody, ["args", "metadata", "user"]),
+    getNestedValue(rawBody, ["metadata", "telegram_user"]),
+    getNestedValue(rawBody, ["metadata", "user"]),
+    getNestedValue(body, ["metadata", "telegram_user"]),
+    getNestedValue(body, ["metadata", "user"]),
+  ].filter((value) => value && typeof value === "object");
+
+  for (const candidate of nestedUserCandidates) {
+    Object.assign(merged, candidate);
+  }
+
+  return merged;
+}
+
+function enrichBodyCustomer(rawBody, body) {
+  const context = collectRetellDynamicContext(rawBody, body);
+  const customer = body && typeof body.customer === "object" ? { ...body.customer } : {};
+  const firstName = firstNonEmptyString(
+    customer.first_name,
+    customer.firstName,
+    context.first_name,
+    context.firstName
+  );
+  const lastName = firstNonEmptyString(
+    customer.last_name,
+    customer.lastName,
+    context.last_name,
+    context.lastName
+  );
+  const fullName = firstNonEmptyString(
+    customer.name,
+    customer.full_name,
+    context.name,
+    context.full_name,
+    [firstName, lastName].filter(Boolean).join(" ").trim()
+  );
+
+  return {
+    ...body,
+    metadata: body && typeof body.metadata === "object" ? { ...context, ...body.metadata } : context,
+    customer: {
+      ...customer,
+      telegram_user_id: firstNonEmptyString(
+        customer.telegram_user_id,
+        customer.telegram_id,
+        context.telegram_user_id,
+        context.telegram_id,
+        context.user_id,
+        context.id
+      ),
+      telegram_id: firstNonEmptyString(
+        customer.telegram_id,
+        customer.telegram_user_id,
+        context.telegram_id,
+        context.telegram_user_id,
+        context.user_id,
+        context.id
+      ),
+      username: firstNonEmptyString(
+        customer.username,
+        context.username,
+        context.telegram_username
+      ).replace(/^@/, ""),
+      name: fullName,
+      full_name: fullName,
+      first_name: firstName,
+      last_name: lastName,
+      telegram_init_data: firstNonEmptyString(
+        customer.telegram_init_data,
+        context.telegram_init_data,
+        context.initData
+      ),
+    },
+  };
 }
 
 function getTelegramId(customer) {
@@ -281,21 +770,26 @@ function getRetellCallKey(body) {
   ).trim();
 }
 
-function getCartSessionKey(body) {
+function getCartSessionKeys(body) {
   const customer = body?.customer || {};
   const telegramId = getTelegramId(customer);
-  if (telegramId) {
-    return `tg:${telegramId}`;
-  }
   const retellKey = getRetellCallKey(body);
+  const keys = [];
   if (retellKey) {
-    return `retell:${retellKey}`;
+    keys.push(`retell:${retellKey}`);
   }
-  return "";
+  if (telegramId) {
+    keys.push(`tg:${telegramId}`);
+  }
+  return keys;
 }
 
-function writeCartSession(body, items) {
-  const key = getCartSessionKey(body);
+function getPrimaryCartSessionKey(body) {
+  return getCartSessionKeys(body)[0] || "";
+}
+
+async function writeCartSession(body, items) {
+  const keys = getCartSessionKeys(body);
   if (!Array.isArray(items) || !items.length) {
     return;
   }
@@ -303,40 +797,57 @@ function writeCartSession(body, items) {
     items: items.map((item) => ({ sku: String(item.sku || ""), qty: Number(item.qty || 0) })).filter((item) => item.sku && item.qty > 0),
     expiresAt: Date.now() + CART_SESSION_TTL_MS,
   };
-  if (key) {
+  for (const key of keys) {
     cartSessions.set(key, session);
   }
-  latestCartSession = session;
+  if (keys.length) {
+    await persistCartSession(body, session.items, keys);
+  }
 }
 
-function readCartSession(body) {
-  const key = getCartSessionKey(body);
-  const session = key ? cartSessions.get(key) : latestCartSession;
+async function readCartSession(body) {
+  const keys = getCartSessionKeys(body);
+  let session = null;
+  for (const key of keys) {
+    session = cartSessions.get(key);
+    if (session) {
+      break;
+    }
+  }
+  if (!session && keys.length) {
+    const persistedItems = await readPersistedCartSession(body, keys);
+    if (persistedItems.length) {
+      session = {
+        items: persistedItems,
+        expiresAt: Date.now() + CART_SESSION_TTL_MS,
+      };
+      for (const key of keys) {
+        cartSessions.set(key, session);
+      }
+    }
+  }
   if (!session) {
     return [];
   }
   if (session.expiresAt <= Date.now()) {
-    if (key) {
+    for (const key of keys) {
       cartSessions.delete(key);
-    }
-    if (latestCartSession === session) {
-      latestCartSession = null;
     }
     return [];
   }
   return Array.isArray(session.items) ? session.items : [];
 }
 
-function resolveCartItems(body) {
+async function resolveCartItems(body) {
   const directItems = Array.isArray(body.cart?.items) ? body.cart.items : [];
   if (directItems.length) {
-    writeCartSession(body, directItems);
+    await writeCartSession(body, directItems);
     return directItems;
   }
   return readCartSession(body);
 }
 
-function getMissingDeliveryFields(checkout) {
+function getMissingQuoteFields(checkout) {
   const fields = [
     ["delivery_area", "delivery area"],
     ["delivery_name", "delivery name"],
@@ -346,6 +857,36 @@ function getMissingDeliveryFields(checkout) {
   return fields
     .filter(([key]) => !String(checkout?.[key] || "").trim())
     .map(([key, label]) => ({ key, label }));
+}
+
+function getMissingSubmitFields(checkout) {
+  const fields = [
+    ["delivery_area", "delivery area"],
+    ["delivery_name", "delivery name"],
+    ["delivery_address", "delivery address"],
+    ["delivery_contact", "delivery contact number"],
+    ["payment_method", "payment method"],
+  ];
+  return fields
+    .filter(([key]) => !String(checkout?.[key] || "").trim())
+    .map(([key, label]) => ({ key, label }));
+}
+
+function normalizePaymentMethod(paymentMethod) {
+  const raw = String(paymentMethod || "").trim().toLowerCase();
+  if (!raw) {
+    return "";
+  }
+  if (raw.includes("cash") || raw === "cod") {
+    return "Cash on Delivery";
+  }
+  if (raw.includes("bank")) {
+    return "Bank Transfer";
+  }
+  if (raw.includes("wallet") || raw.includes("gcash") || raw.includes("maya") || raw.includes("vybe")) {
+    return "E-Wallet";
+  }
+  return String(paymentMethod || "").trim();
 }
 
 function buildMissingFieldError(action, message, errorCode, missingFields) {
@@ -391,14 +932,34 @@ function getOrderFollowUpKeys(customer) {
     .filter(Boolean);
 }
 
+function normalizePhone(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
 function parseOrderCreatedAt(order) {
   const timestamp = Date.parse(String(order.created_at || "").trim());
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
-async function findOrderRecord(orderId, customer) {
-  const rows = await getSheetValues("Orders").catch(() => [ORDER_HEADERS]);
-  const records = mapSheetRows(rows);
+async function hasRepeatBuyerHistory(customer = {}, checkout = {}) {
+  const rows = await getRecordRows("Orders").catch(() => [ORDER_HEADERS]);
+  const records = mapSheetRows(rows).map(normalizeLegacyOrderRecord);
+  const keys = new Set(getOrderFollowUpKeys(customer));
+  const phone = normalizePhone(checkout.delivery_contact || customer.delivery_contact);
+  if (!keys.size && !phone) {
+    return false;
+  }
+  return records.some((record) => {
+    const userId = String(record.user_id || "").trim().replace(/^@/, "");
+    const username = String(record.username || "").trim().replace(/^@/, "");
+    const recordPhone = normalizePhone(record.delivery_contact || "");
+    return keys.has(userId) || keys.has(username) || (phone && phone === recordPhone);
+  });
+}
+
+async function findOrderRecord(orderId, customer, orderSearch = {}) {
+  const rows = await getRecordRows("Orders").catch(() => [ORDER_HEADERS]);
+  const records = mapSheetRows(rows).map(normalizeLegacyOrderRecord);
   const normalizedOrderId = String(orderId || "").trim().toUpperCase();
   if (normalizedOrderId) {
     return (
@@ -407,14 +968,26 @@ async function findOrderRecord(orderId, customer) {
   }
 
   const keys = getOrderFollowUpKeys(customer);
-  if (!keys.length) {
+  const searchUsername = String(
+    orderSearch.telegram_username || orderSearch.username || customer.username || ""
+  )
+    .trim()
+    .replace(/^@/, "");
+  const searchPhone = normalizePhone(orderSearch.phone || orderSearch.delivery_contact || customer.delivery_contact);
+  if (!keys.length && !searchUsername && !searchPhone) {
     return null;
   }
 
   const matching = records.filter((record) => {
     const userId = String(record.user_id || "").trim().replace(/^@/, "");
     const username = String(record.username || "").trim().replace(/^@/, "");
-    return keys.includes(userId) || keys.includes(username);
+    const phone = normalizePhone(record.delivery_contact || "");
+    return (
+      keys.includes(userId) ||
+      keys.includes(username) ||
+      (searchUsername && username === searchUsername) ||
+      (searchPhone && phone === searchPhone)
+    );
   });
 
   if (!matching.length) {
@@ -425,7 +998,7 @@ async function findOrderRecord(orderId, customer) {
   return matching[0];
 }
 
-async function upsertUserDelivery(customer, checkout) {
+async function upsertUserDeliveryRecord(customer, checkout) {
   const userId = getNumericTelegramUserId(customer);
   if (!userId) {
     return;
@@ -442,17 +1015,65 @@ async function upsertUserDelivery(customer, checkout) {
     nowIso(),
   ];
 
-  const rows = await getSheetValues("Users").catch(() => [USER_HEADERS]);
+  const rows = await getRecordRows("Users").catch(() => [USER_HEADERS]);
   const existingIndex = rows.slice(1).findIndex((row) => String(row?.[0] || "").trim() === userId);
   if (existingIndex >= 0) {
-    await updateSheetRow("Users", existingIndex + 2, rowValues);
+    await updateRecordRow("Users", existingIndex + 2, rowValues);
     return;
   }
-  await appendSheetRow("Users", rowValues);
+  await appendRecordRow("Users", rowValues);
 }
 
-async function logOrderToSheets(order) {
-  await appendSheetRow("Orders", [
+async function findUserDeliveryRecord(customer = {}) {
+  const rows = await getRecordRows("Users").catch(() => [USER_HEADERS]);
+  const records = mapSheetRows(rows);
+  const numericTelegramId = getNumericTelegramUserId(customer);
+  const anyTelegramId = getTelegramId(customer);
+  const username = getTelegramUsername(customer);
+
+  let match = null;
+  if (numericTelegramId) {
+    match = records.find((record) => String(record.user_id || "").trim() === numericTelegramId);
+  }
+  if (!match && anyTelegramId) {
+    match = records.find((record) => String(record.user_id || "").trim() === anyTelegramId);
+  }
+  if (!match && username) {
+    match = records.find((record) => String(record.username || "").trim().replace(/^@/, "") === username);
+  }
+  return match || null;
+}
+
+async function handleGetSavedDelivery(body) {
+  const customer = body.customer || {};
+  const record = await findUserDeliveryRecord(customer);
+  if (!record) {
+    return {
+      ok: false,
+      action: "get_saved_delivery",
+      error_code: "DELIVERY_RECORD_NOT_FOUND",
+      message: "No saved delivery details were found for this Telegram account.",
+    };
+  }
+  return {
+    ok: true,
+    action: "get_saved_delivery",
+    message: "Saved delivery details loaded successfully.",
+    data: {
+      user_id: String(record.user_id || "").trim(),
+      username: String(record.username || "").trim().replace(/^@/, ""),
+      full_name: String(record.full_name || "").trim(),
+      delivery_name: String(record.last_delivery_name || "").trim(),
+      delivery_address: String(record.last_delivery_address || "").trim(),
+      delivery_contact: String(record.last_delivery_contact || "").trim(),
+      delivery_area: String(record.last_delivery_area || "").trim(),
+      updated_at: String(record.updated_at || "").trim(),
+    },
+  };
+}
+
+async function logOrderRecord(order) {
+  await appendRecordRow("Orders", [
     order.order_id,
     order.created_at,
     order.user_id,
@@ -468,15 +1089,55 @@ async function logOrderToSheets(order) {
     order.delivery_contact,
     order.delivery_area,
     order.payment_method,
+    order.delivery_method || "Standard",
+    order.referral_code || "",
     order.payment_proof_file_id,
     order.status,
     order.tracking_number || "",
+    JSON.stringify(order.order_photo_file_ids || []),
   ]);
 }
 
-async function logTicketToSheets(ticketType, customer, message) {
+function parsePhotoFileIds(value) {
+  try {
+    const parsed = JSON.parse(String(value || "[]"));
+    return Array.isArray(parsed) ? parsed.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function extractLalamoveTrackingLink(payload) {
+  const candidates = [
+    payload?.data?.shareLink,
+    payload?.data?.trackingUrl,
+    payload?.data?.webLink,
+    payload?.shareLink,
+    payload?.trackingUrl,
+    payload?.webLink,
+  ];
+  return candidates.map((value) => String(value || "").trim()).find((value) => /^https?:\/\//i.test(value)) || "";
+}
+
+async function getLalamoveTrackingLink(orderId) {
+  if (!orderId) {
+    return "";
+  }
+  const result = await handleLalamoveOrderDetails({
+    lalamove: {
+      market: "PH",
+      orderId,
+    },
+  });
+  if (!result?.ok) {
+    return "";
+  }
+  return extractLalamoveTrackingLink(result.data);
+}
+
+async function logTicketRecord(ticketType, customer, message) {
   const ticketId = randomUUID().slice(0, 8);
-  await appendSheetRow("Tickets", [
+  await appendRecordRow("Tickets", [
     ticketId,
     nowIso(),
     ticketType,
@@ -488,8 +1149,8 @@ async function logTicketToSheets(ticketType, customer, message) {
   return ticketId;
 }
 
-async function logAffiliateToSheets(customer, affiliate) {
-  await appendSheetRow("Affiliates", [
+async function logAffiliateRecord(customer, affiliate) {
+  await appendRecordRow("Affiliates", [
     nowIso(),
     getNumericTelegramUserId(customer) || getTelegramId(customer),
     getTelegramUsername(customer),
@@ -498,6 +1159,133 @@ async function logAffiliateToSheets(customer, affiliate) {
     affiliate.contact || "",
     affiliate.subscriber_count || "",
   ]);
+}
+
+// Cart/session persistence uses Redis first, then optional API, then Sheets fallback.
+async function persistCartSessionToSheetsFallback(sessionKey, items) {
+  const rowValues = [sessionKey, JSON.stringify(items || []), nowIso()];
+  const rows = await getRecordRows("CartSessions").catch(() => [CART_SESSION_HEADERS]);
+  const records = mapSheetRows(rows);
+  const existingIndex = records.findIndex((record) => String(record.session_key || "").trim() === sessionKey);
+  if (existingIndex >= 0) {
+    await updateRecordRow("CartSessions", existingIndex + 2, rowValues);
+    return;
+  }
+  await appendRecordRow("CartSessions", rowValues);
+}
+
+async function readCartSessionFromSheetsFallback(sessionKey) {
+  const rows = await getRecordRows("CartSessions").catch(() => [CART_SESSION_HEADERS]);
+  const records = mapSheetRows(rows);
+  const record = records.find((entry) => String(entry.session_key || "").trim() === sessionKey);
+  if (!record) {
+    return [];
+  }
+  try {
+    const items = JSON.parse(String(record.items_json || "[]"));
+    return Array.isArray(items) ? items : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function getCartSessionApiConfig() {
+  const url = String(process.env.POPPERS_CART_SESSION_API_URL || DEFAULT_CART_SESSION_API_URL).trim().replace(/\/$/, "");
+  const token = String(process.env.POPPERS_CART_SESSION_API_TOKEN || "").trim();
+  return { url, token };
+}
+
+async function persistCartSessionToApi(sessionKey, items) {
+  const { url, token } = getCartSessionApiConfig();
+  if (!url || !sessionKey) {
+    return false;
+  }
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({
+      session_key: sessionKey,
+      items: items || [],
+      ttl_seconds: Math.floor(CART_SESSION_TTL_MS / 1000),
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Cart session API write failed with status ${response.status}`);
+  }
+  return true;
+}
+
+async function readCartSessionFromApi(sessionKey) {
+  const { url, token } = getCartSessionApiConfig();
+  if (!url || !sessionKey) {
+    return [];
+  }
+  const response = await fetch(`${url}/${encodeURIComponent(sessionKey)}`, {
+    headers: {
+      Accept: "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (response.status === 404) {
+    return [];
+  }
+  if (!response.ok) {
+    throw new Error(`Cart session API read failed with status ${response.status}`);
+  }
+  const payload = await response.json();
+  return Array.isArray(payload?.data?.items) ? payload.data.items : [];
+}
+
+async function persistCartSession(body, items, keys = getCartSessionKeys(body)) {
+  for (const key of keys) {
+    try {
+      const written = await persistCartSessionToRedis(key, items);
+      if (written) {
+        continue;
+      }
+    } catch (_) {
+      // Fall through to the other stores.
+    }
+    try {
+      const written = await persistCartSessionToApi(key, items);
+      if (written) {
+        continue;
+      }
+    } catch (error) {
+      // Fall through to the sheet-based fallback.
+    }
+    await upsertCartSessionToSheets(key, items);
+  }
+}
+
+async function readPersistedCartSession(body, keys = getCartSessionKeys(body)) {
+  for (const key of keys) {
+    try {
+      const redisItems = await readCartSessionFromRedis(key);
+      if (redisItems.length) {
+        return redisItems;
+      }
+    } catch (_) {
+      // Fall through to other stores.
+    }
+    try {
+      const apiItems = await readCartSessionFromApi(key);
+      if (apiItems.length) {
+        return apiItems;
+      }
+    } catch (_) {
+      // Fall through to sheet-based lookup.
+    }
+    const sheetItems = await readCartSessionFromSheets(key);
+    if (sheetItems.length) {
+      return sheetItems;
+    }
+  }
+  return [];
 }
 
 async function fetchCatalog() {
@@ -564,7 +1352,17 @@ function buildCartLines(products, items) {
 
 async function getPromoDiscount(subtotal, promoCode) {
   const promos = await fetchPromosFromSheet().catch(() => parseJsonEnv("POPPERS_PROMOS_JSON", {}));
-  const code = normalizePromoCode(promoCode);
+  const rawPromo = String(promoCode || "").trim();
+  if (/[,\s/+|&]/.test(rawPromo.replace(/^@/, "")) && rawPromo.trim().split(/[,\s/+|&]+/).filter(Boolean).length > 1) {
+    return {
+      promo_code: rawPromo,
+      promo_discount: 0,
+      promo_applied: false,
+      promo_warning: "Only one promo code can be used per order.",
+      promo_rejected_multiple: true,
+    };
+  }
+  const code = normalizePromoCode(rawPromo);
   if (!code || code === "NONE") {
     return { promo_code: "none", promo_discount: 0, promo_applied: false };
   }
@@ -600,13 +1398,51 @@ function computeRewardRedemption(balance, subtotalAfterPromo) {
   };
 }
 
-function getLoyaltyBalance(customer) {
-  const balances = parseJsonEnv("POPPERS_LOYALTY_BALANCES_JSON", {});
-  const keys = [
-    customer.telegram_user_id,
-    customer.customer_id,
-    customer.username,
+function getRewardIdentityKeys(customer = {}) {
+  return [
+    String(customer.telegram_user_id || "").trim().replace(/^@/, ""),
+    String(customer.telegram_id || "").trim().replace(/^@/, ""),
+    String(customer.customer_id || "").trim().replace(/^@/, ""),
+    String(customer.username || "").trim().replace(/^@/, ""),
   ].filter(Boolean);
+}
+
+function makeReferralCodesForIdentity(userId = "", username = "") {
+  const codes = new Set();
+  const normalizedUsername = String(username || "").trim().replace(/^@/, "");
+  const normalizedUserId = String(userId || "").trim().replace(/^@/, "");
+  if (normalizedUsername) {
+    const sanitized = normalizedUsername.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 10);
+    if (sanitized) {
+      codes.add(`PGPH-${sanitized}`);
+    }
+  }
+  if (normalizedUserId) {
+    codes.add(`PGPH-${normalizedUserId.replace(/\D/g, "").slice(-6)}`);
+  }
+  return Array.from(codes).filter(Boolean);
+}
+
+async function getRewardEvents() {
+  const rows = await getRecordRows("Rewards").catch(() => [REWARD_HEADERS]);
+  return mapSheetRows(rows);
+}
+
+async function getLoyaltyBalance(customer) {
+  const rewardEvents = await getRewardEvents().catch(() => []);
+  const keys = new Set(getRewardIdentityKeys(customer));
+  let balance = 0;
+  for (const event of rewardEvents) {
+    const eventUserId = String(event.user_id || "").trim().replace(/^@/, "");
+    const eventUsername = String(event.username || "").trim().replace(/^@/, "");
+    if (keys.has(eventUserId) || (eventUsername && keys.has(eventUsername))) {
+      balance += Number(event.points_delta || 0);
+    }
+  }
+  if (balance) {
+    return balance;
+  }
+  const balances = parseJsonEnv("POPPERS_LOYALTY_BALANCES_JSON", {});
   for (const key of keys) {
     const value = balances[String(key)];
     if (value !== undefined) {
@@ -616,25 +1452,135 @@ function getLoyaltyBalance(customer) {
   return 0;
 }
 
+async function appendRewardEvent({
+  customer = {},
+  orderId = "",
+  type = "",
+  pointsDelta = 0,
+  message = "",
+  meta = {},
+}) {
+  const eventId = `RW-${randomUUID().slice(0, 8).toUpperCase()}`;
+  await appendRecordRow("Rewards", [
+    eventId,
+    nowIso(),
+    String(customer.telegram_user_id || customer.telegram_id || customer.customer_id || "").trim().replace(/^@/, ""),
+    String(customer.username || "").trim().replace(/^@/, ""),
+    String(orderId || "").trim(),
+    String(type || "").trim(),
+    Number(pointsDelta || 0),
+    String(message || "").trim(),
+    compactJsonStringify(meta || {}),
+  ]);
+  return eventId;
+}
+
+async function findReferrerByReferralCode(referralCode) {
+  const normalizedCode = normalizePromoCode(referralCode);
+  if (!normalizedCode || normalizedCode === "NONE") {
+    return null;
+  }
+  const rows = await getRecordRows("Users").catch(() => [USER_HEADERS]);
+  const users = mapSheetRows(rows);
+  for (const user of users) {
+    const codes = makeReferralCodesForIdentity(user.user_id, user.username);
+    if (codes.includes(normalizedCode)) {
+      return {
+        telegram_user_id: String(user.user_id || "").trim(),
+        telegram_id: String(user.user_id || "").trim(),
+        username: String(user.username || "").trim().replace(/^@/, ""),
+        name: String(user.full_name || "").trim(),
+      };
+    }
+  }
+  return null;
+}
+
+async function settleCompletedOrderRewards(order) {
+  const normalizedStatus = String(order.status || "").trim();
+  if (!REWARD_COMPLETION_STATUSES.has(normalizedStatus)) {
+    return null;
+  }
+
+  const rewardEvents = await getRewardEvents();
+  const completionExists = rewardEvents.some(
+    (event) =>
+      String(event.order_id || "").trim().toUpperCase() === String(order.order_id || "").trim().toUpperCase() &&
+      String(event.type || "").trim() === "completed_order"
+  );
+
+  const summary = {
+    completed_order_points_awarded: 0,
+    referral_points_awarded: 0,
+    points_used_on_order: Number(order.reward_points_used || 0),
+    discount_used_on_order: Number(order.reward_discount || 0),
+    balance_after: 0,
+    referral_code_used: String(order.referral_code || "").trim().toUpperCase(),
+  };
+
+  if (!completionExists) {
+    const customerIdentity = {
+      telegram_user_id: String(order.user_id || "").trim(),
+      telegram_id: String(order.user_id || "").trim(),
+      username: String(order.username || "").trim().replace(/^@/, ""),
+      customer_id: String(order.customer_id || "").trim(),
+    };
+    await appendRewardEvent({
+      customer: customerIdentity,
+      orderId: order.order_id,
+      type: "completed_order",
+      pointsDelta: LOYALTY_POINTS_PER_ORDER,
+      message: `Completed order points for ${order.order_id}`,
+      meta: { status: normalizedStatus },
+    });
+    summary.completed_order_points_awarded = LOYALTY_POINTS_PER_ORDER;
+
+    const referrer = await findReferrerByReferralCode(order.referral_code);
+    const selfKeys = new Set(
+      [customerIdentity.telegram_user_id, customerIdentity.username].map((value) => String(value || "").trim().replace(/^@/, "")).filter(Boolean)
+    );
+    const referrerKey = String(referrer?.telegram_user_id || referrer?.username || "").trim().replace(/^@/, "");
+    const referralAlreadyAwarded = rewardEvents.some(
+      (event) =>
+        String(event.order_id || "").trim().toUpperCase() === String(order.order_id || "").trim().toUpperCase() &&
+        String(event.type || "").trim() === "referral_success"
+    );
+    if (referrer && referrerKey && !selfKeys.has(referrerKey) && !referralAlreadyAwarded) {
+      await appendRewardEvent({
+        customer: referrer,
+        orderId: order.order_id,
+        type: "referral_success",
+        pointsDelta: REFERRAL_SUCCESS_POINTS,
+        message: `Referral points from ${order.order_id}`,
+        meta: {
+          referred_username: customerIdentity.username,
+          referral_code: String(order.referral_code || "").trim().toUpperCase(),
+        },
+      });
+      summary.referral_points_awarded = REFERRAL_SUCCESS_POINTS;
+    }
+  }
+
+  const currentBalance = await getLoyaltyBalance({
+    telegram_user_id: String(order.user_id || "").trim(),
+    telegram_id: String(order.user_id || "").trim(),
+    customer_id: String(order.customer_id || "").trim(),
+    username: String(order.username || "").trim().replace(/^@/, ""),
+  });
+  summary.balance_after = currentBalance;
+  return summary;
+}
+
 function parseMoney(value) {
   const amount = Number(value || 0);
   return Number.isFinite(amount) ? Number(amount.toFixed(2)) : 0;
 }
 
-function getLalamoveQuotedFee(body) {
-  return parseMoney(
-    body.lalamove?.quotedTotal ||
-      body.lalamove?.priceBreakdown?.total ||
-      body.lalamove?.quotation?.priceBreakdown?.total ||
-      0
-  );
-}
-
-function computeTotals(subtotal, discount, deliveryArea, paymentMethod, lalamoveFee = 0) {
+function computeTotals(subtotal, discount, deliveryArea, paymentMethod) {
   const shippingBase = deliveryArea === "Outside Metro Manila" ? SHIPPING_PROVINCIAL : 0;
   const codFee = paymentMethod === "Cash on Delivery" ? COD_FEE : 0;
-  const deliveryFee = parseMoney(lalamoveFee);
-  const shipping = shippingBase + deliveryFee;
+  const deliveryFee = 0;
+  const shipping = shippingBase;
   const total = Math.max(subtotal - discount, 0) + shipping + codFee;
   return {
     shipping_base: Number(shippingBase.toFixed(2)),
@@ -642,6 +1588,177 @@ function computeTotals(subtotal, discount, deliveryArea, paymentMethod, lalamove
     cod_fee: Number(codFee.toFixed(2)),
     shipping: Number((shipping + codFee).toFixed(2)),
     total: Number(total.toFixed(2)),
+  };
+}
+
+function getCheckoutDeliveryMethod(checkout) {
+  const method = String(checkout?.delivery_method || "").trim().toLowerCase();
+  if (method === "lalamove" || method === "same-day lalamove") {
+    return "Lalamove";
+  }
+  return "Standard";
+}
+
+async function getLalamovePickupConfig(pickupPointId = "jay") {
+  const selectedId = String(pickupPointId || "jay").trim().toLowerCase();
+  const source = LALAMOVE_PICKUP_POINTS[selectedId] || LALAMOVE_PICKUP_POINTS.jay;
+  const address =
+    source.id === "jay"
+      ? String(process.env.POPPERS_LALAMOVE_PICKUP_ADDRESS || source.address).trim()
+      : String(source.address || "").trim();
+  const name =
+    source.id === "jay"
+      ? String(process.env.POPPERS_LALAMOVE_PICKUP_NAME || source.name).trim()
+      : String(source.name || "").trim();
+  const phone =
+    source.id === "jay"
+      ? String(process.env.POPPERS_LALAMOVE_PICKUP_PHONE || source.phone).trim()
+      : String(source.phone || "").trim();
+  let lat =
+    source.id === "jay"
+      ? String(process.env.POPPERS_LALAMOVE_PICKUP_LAT || source.lat).trim()
+      : String(source.lat || "").trim();
+  let lng =
+    source.id === "jay"
+      ? String(process.env.POPPERS_LALAMOVE_PICKUP_LNG || source.lng).trim()
+      : String(source.lng || "").trim();
+
+  if (!address) {
+    return null;
+  }
+  if (!lat || !lng) {
+    const coords = await geocodeAddress(address);
+    lat = coords.lat;
+    lng = coords.lng;
+  }
+  return {
+    id: source.id,
+    label: source.label,
+    address,
+    coordinates: { lat, lng },
+    name,
+    phone,
+  };
+}
+
+async function geocodeAddress(address) {
+  const query = String(address || "").trim();
+  if (!query) {
+    throw new Error("Delivery address is required for Lalamove quoting.");
+  }
+  const url = new URL("https://nominatim.openstreetmap.org/search");
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("limit", "1");
+  url.searchParams.set("q", query);
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "PoppersGuyPH/1.0 (checkout geocoding)",
+    },
+  });
+  const data = await response.json();
+  const first = Array.isArray(data) ? data[0] : null;
+  if (!response.ok || !first?.lat || !first?.lon) {
+    throw new Error("Could not geocode the delivery address for Lalamove.");
+  }
+  return {
+    lat: String(first.lat),
+    lng: String(first.lon),
+  };
+}
+
+async function getCheckoutLalamoveQuote(checkout, cart, options = {}) {
+  if (String(checkout?.delivery_area || "").trim() !== "Metro Manila") {
+    return null;
+  }
+  if (getCheckoutDeliveryMethod(checkout) !== "Lalamove") {
+    return null;
+  }
+  const pickup = await getLalamovePickupConfig(options.pickup_point || checkout?.pickup_point || "jay");
+  if (!pickup) {
+    return {
+      ok: false,
+      warning: "Same-day delivery is not configured yet.",
+    };
+  }
+  const recipientCoords = await geocodeAddress(checkout.delivery_address);
+  const body = {
+    lalamove: {
+      market: "PH",
+      serviceType: String(process.env.POPPERS_LALAMOVE_SERVICE_TYPE || DEFAULT_LALAMOVE_SERVICE_TYPE).trim(),
+      language: "en_PH",
+      stops: [
+        {
+          coordinates: pickup.coordinates,
+          address: pickup.address,
+        },
+        {
+          coordinates: recipientCoords,
+          address: checkout.delivery_address,
+        },
+      ],
+      item: {
+        quantity: String((cart.items || []).reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1),
+      },
+    },
+  };
+  const result = await handleLalamoveQuote(body);
+  if (!result.ok) {
+    return {
+      ok: false,
+      warning: result.message || "Same-day delivery quote failed.",
+    };
+  }
+  return {
+    ok: true,
+    quotation_id: String(result.data?.data?.quotationId || result.data?.quotationId || "").trim(),
+    quoted_total: parseMoney(result.data?.quoted_total || 0),
+    currency: String(result.data?.currency || "PHP").trim(),
+    stops: result.data?.data?.stops || result.data?.stops || [],
+    pickup,
+  };
+}
+
+async function placeCheckoutLalamoveOrder(quote, checkout, orderId) {
+  if (!quote?.lalamove?.quotation_id || !Array.isArray(quote.lalamove.stops) || quote.lalamove.stops.length < 2) {
+    return null;
+  }
+  const senderStop = quote.lalamove.stops[0];
+  const recipientStop = quote.lalamove.stops[1];
+  const result = await handleLalamovePlaceOrder({
+    lalamove: {
+      market: "PH",
+      quotationId: quote.lalamove.quotation_id,
+      sender: {
+        stopId: senderStop.stopId,
+        name: quote.lalamove.pickup?.name || "PoppersGuyPH",
+        phone: quote.lalamove.pickup?.phone || "09088960308",
+      },
+      recipients: [
+        {
+          stopId: recipientStop.stopId,
+          name: checkout.delivery_name,
+          phone: checkout.delivery_contact,
+          remarks: `Order ${orderId}`,
+        },
+      ],
+      metadata: {
+        storefrontOrderId: orderId,
+      },
+    },
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      message: result.message || "Lalamove booking failed.",
+      data: result.data,
+    };
+  }
+  return {
+    ok: true,
+    order_id: String(result.data?.data?.orderId || result.data?.orderId || "").trim(),
+    quotation_id: String(result.data?.data?.quotationId || result.data?.quotationId || "").trim(),
+    raw: result.data,
   };
 }
 
@@ -750,7 +1867,46 @@ async function telegramSendMessage(chatId, text, options = {}) {
   return result.payload;
 }
 
+async function telegramSendPhoto(chatId, photoSource, caption = "") {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    throw new Error("TELEGRAM_BOT_TOKEN is not configured");
+  }
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  if (caption) {
+    form.append("caption", caption);
+    form.append("parse_mode", "Markdown");
+  }
+
+  if (typeof photoSource === "string" && photoSource.startsWith("data:")) {
+    const match = /^data:(.*?);base64,(.*)$/.exec(photoSource);
+    if (!match) {
+      throw new Error("Invalid payment proof image data.");
+    }
+    const mimeType = match[1] || "image/jpeg";
+    const bytes = Buffer.from(match[2], "base64");
+    const extension = mimeType.includes("png") ? "png" : mimeType.includes("webp") ? "webp" : "jpg";
+    form.append("photo", new Blob([bytes], { type: mimeType }), `payment-proof.${extension}`);
+  } else {
+    form.append("photo", String(photoSource || ""));
+  }
+
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: "POST",
+    body: form,
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.description || `Telegram photo send failed with status ${response.status}`);
+  }
+  return payload;
+}
+
 async function notifyAdmins(text) {
+  const textWithLink = [String(text || "").trim(), "", `Admin Portal: ${ADMIN_PORTAL_URL}`]
+    .filter(Boolean)
+    .join("\n");
   const adminGroup = process.env.TELEGRAM_ADMIN_GROUP_ID;
   const adminIds = String(process.env.TELEGRAM_ADMIN_IDS || "")
     .split(",")
@@ -759,11 +1915,11 @@ async function notifyAdmins(text) {
 
   const results = [];
   if (adminGroup) {
-    results.push(await telegramSendMessage(adminGroup, text));
+    results.push(await telegramSendMessage(adminGroup, textWithLink));
     return results;
   }
   for (const adminId of adminIds) {
-    results.push(await telegramSendMessage(adminId, text));
+    results.push(await telegramSendMessage(adminId, textWithLink));
   }
   if (!results.length) {
     throw new Error("No Telegram admin target is configured");
@@ -783,7 +1939,6 @@ function buildOrderSummary(order) {
     `Subtotal: PHP ${order.subtotal.toFixed(2)}`,
     `Promo Discount: PHP ${order.promo_discount.toFixed(2)}`,
     `Loyalty Discount: PHP ${order.reward_discount.toFixed(2)}`,
-    `Delivery Fee: PHP ${Number(order.delivery_fee || 0).toFixed(2)}`,
     `COD Fee: PHP ${Number(order.cod_fee || 0).toFixed(2)}`,
     `Shipping and Fees: PHP ${order.shipping.toFixed(2)}`,
     `Total: PHP ${order.total.toFixed(2)}`,
@@ -848,7 +2003,7 @@ async function handleGetProduct(body) {
 
 async function handleCart(body) {
   const { products } = await fetchCatalog();
-  const items = resolveCartItems(body);
+  const items = await resolveCartItems(body);
   const cart = buildCartLines(products, items);
   return {
     ok: true,
@@ -860,7 +2015,7 @@ async function handleCart(body) {
 
 async function handleQuoteOrder(body) {
   const { products } = await fetchCatalog();
-  const items = resolveCartItems(body);
+  const items = await resolveCartItems(body);
   if (!items.length) {
     return {
       ok: false,
@@ -870,7 +2025,8 @@ async function handleQuoteOrder(body) {
     };
   }
   const checkout = body.checkout || {};
-  const missingDeliveryFields = getMissingDeliveryFields(checkout);
+  checkout.payment_method = normalizePaymentMethod(checkout.payment_method);
+  const missingDeliveryFields = getMissingQuoteFields(checkout);
   if (missingDeliveryFields.length) {
     return buildMissingFieldError(
       "quote_order",
@@ -880,21 +2036,44 @@ async function handleQuoteOrder(body) {
     );
   }
   const cart = buildCartLines(products, items);
-  const promo = await getPromoDiscount(cart.subtotal, checkout.promo_code);
-  const loyaltyBalance = getLoyaltyBalance(body.customer || {});
-  const reward = computeRewardRedemption(
-    loyaltyBalance,
-    Math.max(cart.subtotal - promo.promo_discount, 0)
-  );
+  let promoCode = String(checkout.promo_code || "").trim();
+  let promoSource = "manual";
+  if (!promoCode || promoCode.toLowerCase() === "none") {
+    const repeatBuyer = await hasRepeatBuyerHistory(body.customer || {}, checkout);
+    if (repeatBuyer) {
+      promoCode = "LOYAL30";
+      promoSource = "auto_repeat_buyer";
+    }
+  }
+  const promo = await getPromoDiscount(cart.subtotal, promoCode);
+  const loyaltyBalance = await getLoyaltyBalance(body.customer || {});
+  const rewardsBlockedByPromo =
+    Boolean(promo.promo_applied) && Number(loyaltyBalance || 0) >= LOYALTY_REDEEM_POINTS;
+  const reward = promo.promo_applied
+    ? { reward_points_used: 0, reward_discount: 0 }
+    : computeRewardRedemption(
+        loyaltyBalance,
+        Math.max(cart.subtotal - promo.promo_discount, 0)
+      );
   const discount = Number((promo.promo_discount + reward.reward_discount).toFixed(2));
-  const lalamoveFee = getLalamoveQuotedFee(body);
   const totals = computeTotals(
     cart.subtotal,
     discount,
     checkout.delivery_area || "Metro Manila",
-    checkout.payment_method || "Cash on Delivery",
-    lalamoveFee
+    checkout.payment_method
   );
+  const warnings = [promo.promo_warning].filter(Boolean);
+  if (rewardsBlockedByPromo) {
+    warnings.push("Promos and rewards cannot be combined in the same order.");
+  }
+  const lalamove = await getCheckoutLalamoveQuote(checkout, cart);
+  if (lalamove?.ok) {
+    totals.delivery_fee = parseMoney(lalamove.quoted_total);
+    totals.shipping = parseMoney(totals.shipping + totals.delivery_fee);
+    totals.total = parseMoney(totals.total + totals.delivery_fee);
+  } else if (lalamove?.warning) {
+    warnings.push(lalamove.warning);
+  }
 
   return {
     ok: true,
@@ -904,20 +2083,76 @@ async function handleQuoteOrder(body) {
       ...cart,
       promo_code: promo.promo_code,
       promo_applied: Boolean(promo.promo_applied),
+      promo_source: promoSource,
+      promo_auto_applied: promoSource === "auto_repeat_buyer" && Boolean(promo.promo_applied),
       promo_discount: promo.promo_discount,
       reward_points_used: reward.reward_points_used,
       reward_discount: reward.reward_discount,
+      rewards_blocked_by_promo: rewardsBlockedByPromo,
       discount,
       loyalty_balance: loyaltyBalance,
-      lalamove_quotation_id: body.lalamove?.quotationId || "",
       delivery_fee: totals.delivery_fee,
       cod_fee: totals.cod_fee,
       shipping_base: totals.shipping_base,
       shipping: totals.shipping,
       total: totals.total,
-      warnings: [promo.promo_warning].filter(Boolean),
+      payment_method: checkout.payment_method,
+      delivery_method: getCheckoutDeliveryMethod(checkout),
+      lalamove:
+        lalamove?.ok
+          ? {
+              quotation_id: lalamove.quotation_id,
+              quoted_total: lalamove.quoted_total,
+              currency: lalamove.currency,
+              stops: lalamove.stops,
+              pickup: lalamove.pickup,
+            }
+          : null,
+      warnings,
     },
   };
+}
+
+async function handleValidateDeliveryAddress(body) {
+  const checkout = body.checkout || {};
+  const address = String(checkout.delivery_address || "").trim();
+  if (!address) {
+    return {
+      ok: false,
+      action: "validate_delivery_address",
+      message: "Delivery address is required.",
+      error_code: "MISSING_DELIVERY_ADDRESS",
+    };
+  }
+
+  try {
+    const coordinates = await geocodeAddress(address);
+    return {
+      ok: true,
+      action: "validate_delivery_address",
+      message: "Delivery address verified successfully.",
+      data: {
+        address,
+        delivery_area: String(checkout.delivery_area || "").trim(),
+        delivery_method: getCheckoutDeliveryMethod(checkout),
+        coordinates,
+        verified: true,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      action: "validate_delivery_address",
+      message: error instanceof Error ? error.message : "Could not verify the delivery address.",
+      error_code: "DELIVERY_ADDRESS_NOT_VERIFIED",
+      data: {
+        address,
+        delivery_area: String(checkout.delivery_area || "").trim(),
+        delivery_method: getCheckoutDeliveryMethod(checkout),
+        verified: false,
+      },
+    };
+  }
 }
 
 async function handleSubmitOrder(body) {
@@ -929,15 +2164,8 @@ async function handleSubmitOrder(body) {
   const customer = body.customer || {};
   const telegramId = getTelegramId(customer);
   const checkout = body.checkout || {};
-  if (!telegramId) {
-    return {
-      ok: false,
-      action: "submit_order",
-      message: "Telegram ID or Telegram username is required before submitting the order.",
-      error_code: "MISSING_TELEGRAM_ID",
-    };
-  }
-  const missingDeliveryFields = getMissingDeliveryFields(checkout);
+  checkout.payment_method = normalizePaymentMethod(checkout.payment_method);
+  const missingDeliveryFields = getMissingSubmitFields(checkout);
   if (missingDeliveryFields.length) {
     return buildMissingFieldError(
       "submit_order",
@@ -947,15 +2175,15 @@ async function handleSubmitOrder(body) {
     );
   }
   const orderId = makeOrderId(customer);
-  const status = getOrderStatus(checkout.payment_method || "");
+  const status = getOrderStatus(checkout.payment_method);
   const order = {
     order_id: orderId,
     created_at: nowIso(),
     customer_id: customer.customer_id || "",
-    user_id: getNumericTelegramUserId(customer) || telegramId,
+    user_id: getNumericTelegramUserId(customer) || telegramId || String(customer.customer_id || "").trim(),
     telegram_user_id: telegramId,
     full_name: customer.name || checkout.delivery_name || "",
-    username: String(customer.username || telegramId).replace(/^@/, ""),
+    username: String(customer.username || "").replace(/^@/, ""),
     status,
     items: quote.data.items,
     subtotal: quote.data.subtotal,
@@ -963,9 +2191,6 @@ async function handleSubmitOrder(body) {
     reward_discount: quote.data.reward_discount,
     reward_points_used: quote.data.reward_points_used,
     discount: quote.data.discount,
-    lalamove_quotation_id: body.lalamove?.quotationId || quote.data.lalamove_quotation_id || "",
-    lalamove_order_id: "",
-    lalamove_share_link: "",
     delivery_fee: quote.data.delivery_fee || 0,
     cod_fee: quote.data.cod_fee || 0,
     shipping_base: quote.data.shipping_base || 0,
@@ -975,19 +2200,34 @@ async function handleSubmitOrder(body) {
     delivery_address: checkout.delivery_address || "",
     delivery_contact: checkout.delivery_contact || "",
     delivery_area: checkout.delivery_area || "",
-    payment_method: checkout.payment_method || "",
+    payment_method: checkout.payment_method,
+    delivery_method: getCheckoutDeliveryMethod(checkout),
+    referral_code: String(checkout.referral_code || "").trim().toUpperCase(),
     payment_proof_url: checkout.payment_proof_url || "",
     payment_proof_file_id: checkout.payment_proof_file_id || "",
     tracking_number: "",
   };
 
+  if (order.delivery_method === "Lalamove" && order.payment_method === "Cash on Delivery" && quote.data?.lalamove) {
+    try {
+      const lalamoveOrder = await placeCheckoutLalamoveOrder(quote.data, checkout, order.order_id);
+      if (lalamoveOrder?.ok && lalamoveOrder.order_id) {
+        order.tracking_number = lalamoveOrder.order_id;
+      }
+    } catch (_) {
+      // Lalamove booking failures are surfaced later in notifications.
+    }
+  }
+
   const adminText = [
     `New order *${order.order_id}*`,
     `Customer: ${order.full_name || "-"}${order.username ? ` (@${order.username})` : ""}`,
-    `Telegram ID: ${telegramId}`,
+    `Telegram ID: ${order.user_id || telegramId || "-"}`,
+    `Telegram Username: ${order.username ? `@${order.username}` : "-"}`,
+    `Referral Code: ${order.referral_code || "-"}`,
     `Total: PHP ${order.total.toFixed(2)}`,
-    `Delivery Fee: PHP ${Number(order.delivery_fee || 0).toFixed(2)}`,
     `Payment: ${order.payment_method}`,
+    `Delivery Method: ${order.delivery_method}`,
     `Status: ${order.status}`,
     "",
     "Items:",
@@ -1002,6 +2242,12 @@ async function handleSubmitOrder(body) {
     `Your order *${order.order_id}* has been created.`,
     `Status: ${order.status}`,
     `Total: PHP ${order.total.toFixed(2)}`,
+    ...(order.delivery_method === "Lalamove" && order.payment_method !== "Cash on Delivery"
+      ? ["Same-day delivery is already included in your total. No need to pay the rider separately."]
+      : []),
+    ...(order.delivery_method === "Lalamove" && order.payment_method === "Cash on Delivery"
+      ? ["For COD same-day delivery, payment will be collected upon delivery."]
+      : []),
     "",
     "We will update you with confirmation and tracking soon.",
   ].join("\n");
@@ -1011,38 +2257,18 @@ async function handleSubmitOrder(body) {
     customer_notified: false,
   };
 
-  const shouldPlaceLalamove =
-    Boolean(body.lalamove?.autoPlaceOrder) &&
-    Boolean(body.lalamove?.quotationId) &&
-    body.checkout?.payment_confirmed === true;
-
-  if (shouldPlaceLalamove) {
-    const bookingResult = await handleLalamovePlaceOrder(body);
-    if (bookingResult.ok) {
-      order.lalamove_order_id = bookingResult.data?.data?.orderId || bookingResult.data?.orderId || "";
-      order.lalamove_share_link =
-        bookingResult.data?.data?.shareLink || bookingResult.data?.shareLink || "";
-      if (order.lalamove_order_id) {
-        notifications.lalamove_booked = true;
-      }
-    } else {
-      notifications.lalamove_booked = false;
-      notifications.lalamove_error = bookingResult.message;
-    }
-  }
-
   notifications.sheet_logged = false;
   notifications.user_saved = false;
 
   try {
-    await logOrderToSheets(order);
+    await logOrderRecord(order);
     notifications.sheet_logged = true;
   } catch (error) {
     notifications.sheet_error = error instanceof Error ? error.message : "Failed to log order.";
   }
 
   try {
-    await upsertUserDelivery(customer, checkout);
+    await upsertUserDeliveryRecord(customer, checkout);
     notifications.user_saved = true;
   } catch (error) {
     notifications.user_save_error = error instanceof Error ? error.message : "Failed to save user delivery info.";
@@ -1053,6 +2279,32 @@ async function handleSubmitOrder(body) {
     notifications.admin_notified = true;
   } catch (error) {
     notifications.admin_error = error instanceof Error ? error.message : "Failed to notify admins.";
+  }
+
+  if (checkout.payment_proof_url) {
+    try {
+      const adminGroup = process.env.TELEGRAM_ADMIN_GROUP_ID;
+      const adminIds = String(process.env.TELEGRAM_ADMIN_IDS || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const targets = adminGroup ? [adminGroup] : adminIds;
+      for (const target of targets) {
+        const photoResult = await telegramSendPhoto(
+          target,
+          checkout.payment_proof_url,
+          `Payment proof for *${order.order_id}*\nAdmin Portal: ${ADMIN_PORTAL_URL}`
+        );
+        const firstPhoto = photoResult?.result?.photo?.slice(-1)?.[0];
+        if (firstPhoto?.file_id) {
+          order.payment_proof_file_id = firstPhoto.file_id;
+        }
+      }
+      notifications.payment_proof_forwarded = true;
+    } catch (error) {
+      notifications.payment_proof_error =
+        error instanceof Error ? error.message : "Failed to forward payment proof.";
+    }
   }
 
   const numericTelegramUserId = getNumericTelegramUserId(customer);
@@ -1082,17 +2334,20 @@ async function handleSubmitOrder(body) {
 
 async function handleTrackOrder(body, useLatest = false) {
   const customer = body.customer || {};
-  const requestedOrderId = useLatest ? "" : String(body.order?.order_id || body.order_id || "").trim();
-  if (!useLatest && !requestedOrderId) {
+  const orderSearch = body.order || {};
+  const requestedOrderId = useLatest ? "" : String(orderSearch.order_id || body.order_id || "").trim();
+  const searchUsername = String(orderSearch.telegram_username || orderSearch.username || customer.username || "").trim();
+  const searchPhone = normalizePhone(orderSearch.phone || orderSearch.delivery_contact || "");
+  if (!useLatest && !requestedOrderId && !searchUsername && !searchPhone) {
     return {
       ok: false,
       action: "track_order",
-      message: "Order number is required for order follow-up.",
-      error_code: "MISSING_ORDER_ID",
+      message: "Order number, Telegram username, or phone number is required for order follow-up.",
+      error_code: "MISSING_TRACKING_LOOKUP",
     };
   }
 
-  const order = await findOrderRecord(requestedOrderId, customer);
+  const order = await findOrderRecord(requestedOrderId, customer, orderSearch);
   if (!order) {
     return {
       ok: false,
@@ -1106,6 +2361,7 @@ async function handleTrackOrder(body, useLatest = false) {
 
   const status = String(order.status || "").trim() || "Pending";
   const trackingNumber = String(order.tracking_number || "").trim();
+  const photoFileIds = parsePhotoFileIds(order.order_photo_file_ids);
   return {
     ok: true,
     action: useLatest ? "track_latest_order" : "track_order",
@@ -1125,6 +2381,192 @@ async function handleTrackOrder(body, useLatest = false) {
       total: parseMoney(order.total),
       created_at: String(order.created_at || "").trim(),
       tracking_available: Boolean(trackingNumber),
+      order_photo_count: photoFileIds.length,
+      order_photos: photoFileIds.map((_, index) => ({
+        index,
+        url: `https://poppers.jcit.digital/api/storefront/order-photo?order_id=${encodeURIComponent(
+          String(order.order_id || "").trim()
+        )}&index=${index}`,
+      })),
+    },
+  };
+}
+
+async function handleCompleteOrder(body) {
+  const customer = body.customer || {};
+  const requestedOrderId = String(body.order_id || body.order?.order_id || "").trim();
+  const requestedStatus = String(body.status || "").trim();
+  const normalizedStatus = ["Delivered", "Completed"].includes(requestedStatus) ? requestedStatus : "Completed";
+  if (!requestedOrderId) {
+    return {
+      ok: false,
+      action: "complete_order",
+      message: "Order number is required.",
+      error_code: "MISSING_ORDER_ID",
+    };
+  }
+
+  const rows = await getRecordRows("Orders").catch(() => [ORDER_HEADERS]);
+  const records = mapSheetRows(rows).map(normalizeLegacyOrderRecord);
+  const index = records.findIndex(
+    (record) => String(record.order_id || "").trim().toUpperCase() === requestedOrderId.toUpperCase()
+  );
+  if (index < 0) {
+    return {
+      ok: false,
+      action: "complete_order",
+      message: "Order not found.",
+      error_code: "ORDER_NOT_FOUND",
+    };
+  }
+
+  const order = records[index];
+  const matched = await findOrderRecord(requestedOrderId, customer, body.order || {});
+  if (!matched || String(matched.order_id || "").trim().toUpperCase() !== requestedOrderId.toUpperCase()) {
+    return {
+      ok: false,
+      action: "complete_order",
+      message: "This customer is not allowed to update that order.",
+      error_code: "ORDER_ACCESS_DENIED",
+    };
+  }
+
+  const updated = {
+    ...order,
+    status: normalizedStatus,
+  };
+  await updateRecordRow("Orders", index + 2, [
+    updated.order_id,
+    updated.created_at,
+    updated.user_id,
+    updated.username,
+    updated.full_name,
+    updated.items_json,
+    updated.subtotal,
+    updated.discount,
+    updated.shipping,
+    updated.total,
+    updated.delivery_name,
+    updated.delivery_address,
+    updated.delivery_contact,
+    updated.delivery_area,
+    updated.payment_method,
+    updated.delivery_method || "Standard",
+    updated.referral_code || "",
+    updated.payment_proof_file_id || "",
+    updated.status,
+    updated.tracking_number || "",
+    updated.order_photo_file_ids || "[]",
+  ]);
+
+  const rewardsSummary = await settleCompletedOrderRewards({
+    ...updated,
+    reward_points_used: Number(body.reward_points_used || order.reward_points_used || 0),
+    reward_discount: Number(body.reward_discount || order.reward_discount || 0),
+    customer_id: String(customer.customer_id || "").trim(),
+  }).catch(() => null);
+
+  await notifyAdmins(
+    [
+      "Customer order status update",
+      `Order: ${updated.order_id}`,
+      `Status: ${updated.status}`,
+      `Username: ${customer.username ? `@${customer.username}` : String(updated.username || "-").replace(/^@/, "")}`,
+      `Telegram ID: ${customer.telegram_user_id || customer.telegram_id || updated.user_id || "-"}`,
+      rewardsSummary ? `Rewards balance: ${rewardsSummary.balance_after} points` : "",
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+
+  return {
+    ok: true,
+    action: "complete_order",
+    message: `Order marked as ${normalizedStatus}.`,
+    data: {
+      order_id: String(updated.order_id || "").trim(),
+      status: normalizedStatus,
+      rewards: rewardsSummary,
+      tracking_link: `https://poppers.jcit.digital/poppers/track?order_id=${encodeURIComponent(String(updated.order_id || "").trim())}`,
+    },
+  };
+}
+
+async function handleSubmitSurvey(body) {
+  const customer = body.customer || {};
+  const orderId = String(body.order_id || body.order?.order_id || "").trim();
+  const rating = Number(body.survey?.rating || body.rating || 0);
+  const comment = String(body.survey?.comment || body.comment || "").trim();
+  const source = String(body.survey?.source || body.source || "tracking").trim();
+  if (!orderId) {
+    return {
+      ok: false,
+      action: "submit_survey",
+      message: "Order number is required.",
+      error_code: "MISSING_ORDER_ID",
+    };
+  }
+  if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+    return {
+      ok: false,
+      action: "submit_survey",
+      message: "A rating from 1 to 5 is required.",
+      error_code: "INVALID_SURVEY_RATING",
+    };
+  }
+
+  const matched = await findOrderRecord(orderId, customer, body.order || {});
+  if (!matched || String(matched.order_id || "").trim().toUpperCase() !== orderId.toUpperCase()) {
+    return {
+      ok: false,
+      action: "submit_survey",
+      message: "This customer is not allowed to review that order.",
+      error_code: "ORDER_ACCESS_DENIED",
+    };
+  }
+
+  const rows = await getRecordRows("Surveys").catch(() => [SURVEY_HEADERS]);
+  const records = mapSheetRows(rows);
+  const existingIndex = records.findIndex(
+    (record) => String(record.order_id || "").trim().toUpperCase() === orderId.toUpperCase()
+  );
+  const rowValues = [
+    existingIndex >= 0 ? String(records[existingIndex].survey_id || "").trim() || `SV-${randomUUID().slice(0, 8).toUpperCase()}` : `SV-${randomUUID().slice(0, 8).toUpperCase()}`,
+    nowIso(),
+    orderId,
+    String(customer.telegram_user_id || customer.telegram_id || matched.user_id || "").trim().replace(/^@/, ""),
+    String(customer.username || matched.username || "").trim().replace(/^@/, ""),
+    rating,
+    comment,
+    source,
+  ];
+  if (existingIndex >= 0) {
+    await updateRecordRow("Surveys", existingIndex + 2, rowValues);
+  } else {
+    await appendRecordRow("Surveys", rowValues);
+  }
+
+  await notifyAdmins(
+    [
+      "New order survey",
+      `Order: ${orderId}`,
+      `Rating: ${rating}/5`,
+      rowValues[4] ? `Username: @${rowValues[4]}` : "",
+      comment ? `Comment: ${comment}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+
+  return {
+    ok: true,
+    action: "submit_survey",
+    message: "Survey submitted successfully.",
+    data: {
+      order_id: orderId,
+      rating,
+      comment,
+      source,
     },
   };
 }
@@ -1156,7 +2598,7 @@ async function handleSupportTicket(body) {
     `Telegram ID: ${telegramId}`,
     `Message: ${message}`,
   ].join("\n");
-  const ticketId = await logTicketToSheets("customer_service", customer, message);
+  const ticketId = await logTicketRecord("customer_service", customer, message);
   await notifyAdmins(text);
   return {
     ok: true,
@@ -1183,7 +2625,7 @@ async function handleBulkOrder(body) {
     `Target Date: ${bulk.target_date || "-"}`,
     `Message: ${bulk.message || "-"}`,
   ].join("\n");
-  const ticketId = await logTicketToSheets("bulk_order", customer, ticketMessage);
+  const ticketId = await logTicketRecord("bulk_order", customer, ticketMessage);
   await notifyAdmins(text);
   return {
     ok: true,
@@ -1206,7 +2648,7 @@ async function handleAffiliate(body) {
     `Contact: ${affiliate.contact || "-"}`,
     `Subscriber Count: ${affiliate.subscriber_count || "-"}`,
   ].join("\n");
-  await logAffiliateToSheets(customer, affiliate);
+  await logAffiliateRecord(customer, affiliate);
   await notifyAdmins(text);
   return {
     ok: true,
@@ -1217,7 +2659,7 @@ async function handleAffiliate(body) {
 }
 
 async function handleRewards(body) {
-  const balance = getLoyaltyBalance(body.customer || {});
+  const balance = await getLoyaltyBalance(body.customer || {});
   const reward = computeRewardRedemption(balance, 1000000);
   return {
     ok: true,
@@ -1436,7 +2878,11 @@ async function handleSendTelegram(body) {
   };
 }
 
-module.exports = async function handler(req, res) {
+function createHandler(options = {}) {
+  const allowedActions = Array.isArray(options.allowedActions) ? new Set(options.allowedActions) : null;
+  const requireAuth = options.requireAuth !== false;
+
+  return async function handler(req, res) {
   if (req.method !== "POST") {
     return sendJson(res, 405, {
       ok: false,
@@ -1445,7 +2891,7 @@ module.exports = async function handler(req, res) {
   }
 
   const expectedToken = process.env.RETELL_FUNCTION_AUTH_TOKEN;
-  if (expectedToken) {
+  if (requireAuth && expectedToken) {
     const receivedToken = getBearerToken(req);
     if (!receivedToken || receivedToken !== expectedToken) {
       return sendJson(res, 401, {
@@ -1456,10 +2902,11 @@ module.exports = async function handler(req, res) {
   }
 
   const rawBody = typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
-  const body =
+  const baseBody =
     rawBody && typeof rawBody === "object" && rawBody.args && typeof rawBody.args === "object"
       ? { ...rawBody.args, _retell: { name: rawBody.name || "", call: rawBody.call || null } }
       : rawBody;
+  const body = enrichBodyCustomer(rawBody, baseBody || {});
   const action = String(body.action || "").trim();
 
   if (!action) {
@@ -1467,6 +2914,15 @@ module.exports = async function handler(req, res) {
       ok: false,
       message: "Missing action.",
       error_code: "MISSING_ACTION",
+    });
+  }
+
+  if (allowedActions && !allowedActions.has(action)) {
+    return sendJson(res, 400, {
+      ok: false,
+      action,
+      message: `Unsupported action for this function: ${action}`,
+      error_code: "UNSUPPORTED_ACTION",
     });
   }
 
@@ -1485,6 +2941,9 @@ module.exports = async function handler(req, res) {
         break;
       case "quote_order":
         result = await handleQuoteOrder(body);
+        break;
+      case "validate_delivery_address":
+        result = await handleValidateDeliveryAddress(body);
         break;
       case "submit_order":
         result = await handleSubmitOrder(body);
@@ -1522,6 +2981,15 @@ module.exports = async function handler(req, res) {
       case "track_latest_order":
         result = await handleTrackOrder(body, true);
         break;
+      case "complete_order":
+        result = await handleCompleteOrder(body);
+        break;
+      case "submit_survey":
+        result = await handleSubmitSurvey(body);
+        break;
+      case "get_saved_delivery":
+        result = await handleGetSavedDelivery(body);
+        break;
       default:
         result = {
           ok: false,
@@ -1542,4 +3010,35 @@ module.exports = async function handler(req, res) {
       error_code: "INTERNAL_ERROR",
     });
   }
+  };
+}
+
+module.exports = createHandler();
+module.exports.createHandler = createHandler;
+module.exports.helpers = {
+  ORDER_HEADERS,
+  TICKET_HEADERS,
+  PROMO_HEADERS,
+  PRODUCT_HEADERS,
+  ADMIN_USER_HEADERS,
+  REWARD_HEADERS,
+  SURVEY_HEADERS,
+  appendRecordRow,
+  getRecordRows,
+  updateRecordRow,
+  mapSheetRows,
+  telegramSendMessage,
+  parseMoney,
+  nowIso,
+  getCheckoutLalamoveQuote,
+  placeCheckoutLalamoveOrder,
+  getLalamoveTrackingLink,
+  parsePhotoFileIds,
+  telegramSendPhoto,
+  settleCompletedOrderRewards,
+  getLoyaltyBalance,
+  LOYALTY_POINTS_PER_ORDER,
+  REFERRAL_SUCCESS_POINTS,
+  LOYALTY_REDEEM_POINTS,
+  LOYALTY_REDEEM_VALUE,
 };

@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>PoppersGuyPH Delivery Address</title>
+    <meta name="description" content="Verify your delivery address and preview it on the map before checkout." />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body data-page="address">
+    <div class="page-shell">
+      <header class="hero hero--checkout">
+        <div class="hero__glow"></div>
+        <div class="hero__copy">
+          <p class="eyebrow" id="store-badge">Delivery Address</p>
+          <h1 id="store-title">Set your delivery point</h1>
+          <p id="store-description" class="hero__description">
+            Verify the address first, then continue to checkout.
+          </p>
+          <div class="hero__actions">
+            <button id="back-to-checkout" class="cta cta--secondary" type="button">Back to Checkout</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="catalog">
+        <section class="checkout-shell checkout-shell--catalog">
+          <div class="checkout-shell__summary">
+            <div class="checkout-shell__head">
+              <p class="eyebrow">Address</p>
+              <h2>Delivery Details</h2>
+            </div>
+            <form id="address-form" class="checkout-form tracking-form">
+              <div class="form-grid">
+                <label class="field">
+                  <span>Delivery Area</span>
+                  <select name="delivery_area" required>
+                    <option value="Metro Manila">Metro Manila</option>
+                    <option value="Outside Metro Manila">Outside Metro Manila</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Delivery Method</span>
+                  <select name="delivery_method" required>
+                    <option value="Lalamove">Same-day Lalamove</option>
+                    <option value="Standard">Standard</option>
+                  </select>
+                </label>
+              </div>
+              <label class="field">
+                <span>Delivery Address</span>
+                <textarea name="delivery_address" rows="4" placeholder="House number, street, barangay, city" required></textarea>
+                <small id="address-page-feedback" class="field-hint">Verify the address to preview it on the map.</small>
+              </label>
+              <div class="checkout-actions">
+                <button id="verify-address" class="cta cta--secondary" type="button">Verify Address</button>
+                <button id="use-address" class="cta cta--primary" type="submit">Use This Address</button>
+              </div>
+            </form>
+          </div>
+          <div class="checkout-form address-map-shell">
+            <div class="checkout-shell__head">
+              <p class="eyebrow">Map Preview</p>
+              <h2>Delivery Point</h2>
+            </div>
+            <div id="address-map-state" class="empty-state">Verify an address to show the map preview.</div>
+            <div id="address-map-wrap" class="address-map-wrap" hidden>
+              <iframe
+                id="address-map-frame"
+                class="address-map-frame"
+                title="Delivery address map preview"
+                loading="lazy"
+                referrerpolicy="no-referrer-when-downgrade"
+              ></iframe>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-credit">
+        <p>
+          JCIT Ordering App version 2.0. Ordering bot made by JCIT Services. If you would like the same service contact
+          <a href="https://t.me/siJayco" target="_blank" rel="noreferrer">t.me/siJayco</a>
+          or check
+          <a href="https://jcit.digital" target="_blank" rel="noreferrer">jcit.digital</a>.
+        </p>
+      </footer>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
