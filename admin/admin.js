@@ -195,6 +195,7 @@ function bindOrderCard(entry, node) {
   const messageInput = node.querySelector(".admin-order-card__message");
   const photoInput = node.querySelector(".admin-order-card__photos");
   const uploadPhotosButton = node.querySelector(".admin-order-card__upload-photos");
+  const hasTelegramContact = Boolean(entry.telegram_contact_available);
 
   const setCardFeedback = (message, tone = "") => {
     if (!feedback) {
@@ -203,6 +204,15 @@ function bindOrderCard(entry, node) {
     feedback.textContent = message || "";
     feedback.className = `checkout-feedback admin-order-card__feedback${tone ? ` is-${tone}` : ""}`;
   };
+
+  if (contactButton && !hasTelegramContact) {
+    contactButton.hidden = true;
+  }
+  if (messageInput && !hasTelegramContact) {
+    messageInput.hidden = true;
+    messageInput.disabled = true;
+    messageInput.placeholder = "Telegram contact is only available for Telegram orders.";
+  }
 
   if (saveButton) {
     saveButton.addEventListener("click", async () => {
@@ -217,7 +227,12 @@ function bindOrderCard(entry, node) {
         });
         Object.assign(entry, result.order || {});
         set(".admin-order-card__status", entry.status || "Pending");
-        setCardFeedback("Order updated and customer notified.", "success");
+        setCardFeedback(
+          result?.customer_notified
+            ? "Order updated and customer notified."
+            : "Order updated. No Telegram customer notification was sent for this order.",
+          "success"
+        );
         await refreshAdminData();
       } catch (error) {
         setCardFeedback(error instanceof Error ? error.message : "Failed to update order.", "error");
@@ -232,10 +247,15 @@ function bindOrderCard(entry, node) {
       sendTrackingButton.disabled = true;
       setCardFeedback("Sending tracking link...");
       try {
-        await adminRequest("send_tracking_link", {
+        const result = await adminRequest("send_tracking_link", {
           order_id: entry.order_id,
         });
-        setCardFeedback("Tracking link sent to customer.", "success");
+        setCardFeedback(
+          result?.customer_notified
+            ? "Tracking link sent to customer."
+            : "Tracking link is ready. This order does not have a Telegram chat ID, so use the tracking page instead.",
+          "success"
+        );
       } catch (error) {
         setCardFeedback(error instanceof Error ? error.message : "Failed to send tracking link.", "error");
       } finally {
@@ -297,7 +317,11 @@ function bindOrderCard(entry, node) {
             (String(pickupInput?.value || "jay") === "josh" ? "Josh • Vine Residences" : "Jay Concha")
           : "";
         setCardFeedback(
-          pickupLabel ? `Payment verified and auto-booked from ${pickupLabel}.` : "Payment verified and customer notified.",
+          pickupLabel
+            ? `Payment verified and auto-booked from ${pickupLabel}.`
+            : resultWithPickup.notifications?.customer_notified
+              ? "Payment verified and customer notified."
+              : "Payment verified. No Telegram customer notification was sent for this order.",
           "success"
         );
         await refreshAdminData();
@@ -352,7 +376,12 @@ function bindOrderCard(entry, node) {
         Object.assign(entry, result.order || {});
         set(".admin-order-card__status", entry.status || "Cancelled");
         setValue(".admin-order-card__status-input", entry.status || "Cancelled");
-        setCardFeedback("Order cancelled and customer notified.", "success");
+        setCardFeedback(
+          result?.customer_notified
+            ? "Order cancelled and customer notified."
+            : "Order cancelled. No Telegram customer notification was sent for this order.",
+          "success"
+        );
         await refreshAdminData();
       } catch (error) {
         setCardFeedback(error instanceof Error ? error.message : "Failed to cancel order.", "error");

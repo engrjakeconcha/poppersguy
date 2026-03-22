@@ -300,6 +300,10 @@ function normalizePhone(value) {
   return String(value || "").replace(/[^\d+]/g, "");
 }
 
+function isTelegramChatId(value) {
+  return /^-?\d+$/.test(String(value || "").trim());
+}
+
 function buildRewardsSummaryLines(summary) {
   if (!summary) {
     return [];
@@ -385,6 +389,7 @@ function orderRecordToView(record) {
   const trackingLink = normalizedRecord.order_id ? `${TRACKING_BASE_URL}?order_id=${encodeURIComponent(normalizedRecord.order_id)}` : "";
   const username = normalizeUsername(normalizedRecord.username);
   const orderPhotoFileIds = parsePhotoFileIds(normalizedRecord.order_photo_file_ids);
+  const telegram_contact_available = isTelegramChatId(normalizedRecord.user_id);
   return {
     order_id: String(normalizedRecord.order_id || "").trim(),
     created_at: String(normalizedRecord.created_at || "").trim(),
@@ -409,6 +414,7 @@ function orderRecordToView(record) {
     tracking_number: trackingNumber,
     tracking_link: trackingLink,
     order_photo_file_ids: orderPhotoFileIds,
+    telegram_contact_available,
   };
 }
 
@@ -616,7 +622,8 @@ async function handleUpdateOrder(body, admin) {
       : null;
 
   const targetId = String(updated.user_id || "").trim();
-  const shouldNotify = body.notify_customer !== false && targetId;
+  const shouldNotify = body.notify_customer !== false && isTelegramChatId(targetId);
+  let customerNotifyError = "";
   if (shouldNotify) {
     const lines = [
       `Order ${updated.order_id} update`,
@@ -629,7 +636,11 @@ async function handleUpdateOrder(body, admin) {
       lines.push("", ...buildRewardsSummaryLines(rewardsSummary));
     }
     lines.push(`Track here: ${updated.tracking_link}`);
-    await telegramSendMessage(targetId, lines.join("\n"), { parse_mode: null });
+    try {
+      await telegramSendMessage(targetId, lines.join("\n"), { parse_mode: null });
+    } catch (error) {
+      customerNotifyError = error instanceof Error ? error.message : "Failed to notify customer.";
+    }
   }
   await notifyAdminChat(
     [
@@ -641,7 +652,11 @@ async function handleUpdateOrder(body, admin) {
       rewardsSummary ? `Rewards balance: ${rewardsSummary.balance_after} points` : "",
       rewardsSummary ? `Completed points awarded: ${rewardsSummary.completed_order_points_awarded}` : "",
       rewardsSummary ? `Referral points awarded: ${rewardsSummary.referral_points_awarded}` : "",
-      shouldNotify ? "Customer notified: yes" : "Customer notified: no",
+      shouldNotify && !customerNotifyError
+        ? "Customer notified: yes"
+        : customerNotifyError
+          ? `Customer notify error: ${customerNotifyError}`
+          : "Customer notified: no",
     ]
       .filter(Boolean)
       .join("\n")
@@ -652,6 +667,8 @@ async function handleUpdateOrder(body, admin) {
     action: "update_order",
     order: updated,
     rewards: rewardsSummary,
+    customer_notified: shouldNotify && !customerNotifyError,
+    warning: customerNotifyError || "",
     updated_by: admin.username,
     updated_at: nowIso(),
   };
@@ -720,7 +737,7 @@ async function handleVerifyPayment(body, admin) {
   const notifications = {
     customer_notified: false,
   };
-  if (targetId) {
+  if (isTelegramChatId(targetId)) {
     const lines = [
       `Order ${updated.order_id} update`,
       `Status: ${updated.status}`,
@@ -852,7 +869,7 @@ async function handleBookLalamove(body, admin) {
   const notifications = {
     customer_notified: false,
   };
-  if (targetId) {
+  if (isTelegramChatId(targetId)) {
     const lines = [
       `Order ${updated.order_id} update`,
       `Lalamove booking confirmed.`,
@@ -909,14 +926,7 @@ async function handleSendTrackingLink(body, admin) {
   }
   const order = entry.view;
   const targetId = String(order.user_id || "").trim();
-  if (!targetId) {
-    return {
-      ok: false,
-      action: "send_tracking_link",
-      error_code: "MISSING_TELEGRAM_ID",
-      message: "Customer Telegram ID is missing for this order.",
-    };
-  }
+  const canSendToTelegram = isTelegramChatId(targetId);
 
   const lines = [
     `Track your order ${order.order_id}`,
@@ -926,13 +936,26 @@ async function handleSendTrackingLink(body, admin) {
     lines.push(`Tracking number: ${order.tracking_number}`);
   }
   lines.push(order.tracking_link);
-  await telegramSendMessage(targetId, lines.join("\n"), { parse_mode: null });
+  let customerNotifyError = "";
+  let sentTo = "";
+  if (canSendToTelegram) {
+    try {
+      await telegramSendMessage(targetId, lines.join("\n"), { parse_mode: null });
+      sentTo = targetId;
+    } catch (error) {
+      customerNotifyError = error instanceof Error ? error.message : "Failed to send tracking link.";
+    }
+  }
   await notifyAdminChat(
     [
       "Admin action: send_tracking_link",
       `Admin: ${admin.username}`,
       `Order: ${order.order_id}`,
-      `Sent to: ${targetId}`,
+      canSendToTelegram && !customerNotifyError
+        ? `Sent to: ${targetId}`
+        : "Sent to customer: no Telegram chat available",
+      !canSendToTelegram ? `Fallback tracking page: ${order.tracking_link}` : "",
+      customerNotifyError ? `Customer notify error: ${customerNotifyError}` : "",
       order.tracking_number ? `Tracking: ${order.tracking_number}` : "",
     ]
       .filter(Boolean)
@@ -943,7 +966,14 @@ async function handleSendTrackingLink(body, admin) {
     ok: true,
     action: "send_tracking_link",
     order,
-    sent_to: targetId,
+    sent_to: sentTo,
+    customer_notified: Boolean(sentTo),
+    tracking_link: order.tracking_link,
+    contact_channel: canSendToTelegram ? "telegram" : "tracking_page_only",
+    warning:
+      !canSendToTelegram
+        ? "Customer does not have a Telegram chat ID on this order. Use the tracking page link or saved phone contact."
+        : customerNotifyError || "",
   };
 }
 
@@ -973,12 +1003,12 @@ async function handleContactCustomer(body, admin) {
   }
   const order = entry.view;
   const targetId = String(order.user_id || "").trim();
-  if (!targetId) {
+  if (!isTelegramChatId(targetId)) {
     return {
       ok: false,
       action: "contact_customer",
       error_code: "MISSING_TELEGRAM_ID",
-      message: "Customer Telegram ID is missing for this order.",
+      message: "This order does not have a Telegram chat ID. Contact Customer is only available for Telegram orders.",
     };
   }
 
