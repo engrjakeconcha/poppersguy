@@ -955,6 +955,17 @@ async function handleSendTrackingLink(body, admin) {
   if (order.tracking_number) {
     lines.push(`Tracking number: ${order.tracking_number}`);
   }
+  let lalamoveTrackingLink = "";
+  if (order.delivery_method === "Lalamove" && order.tracking_number) {
+    try {
+      lalamoveTrackingLink = await getLalamoveTrackingLink(order.tracking_number);
+    } catch (_) {
+      lalamoveTrackingLink = "";
+    }
+  }
+  if (lalamoveTrackingLink) {
+    lines.push(`Lalamove live tracking: ${lalamoveTrackingLink}`);
+  }
   lines.push(order.tracking_link);
   let customerNotifyError = "";
   let sentTo = "";
@@ -975,6 +986,7 @@ async function handleSendTrackingLink(body, admin) {
         ? `Sent to: ${targetId}`
         : "Sent to customer: no Telegram chat available",
       !canSendToTelegram ? `Fallback tracking page: ${order.tracking_link}` : "",
+      lalamoveTrackingLink ? `Lalamove live tracking: ${lalamoveTrackingLink}` : "",
       customerNotifyError ? `Customer notify error: ${customerNotifyError}` : "",
       order.tracking_number ? `Tracking: ${order.tracking_number}` : "",
     ]
@@ -988,7 +1000,7 @@ async function handleSendTrackingLink(body, admin) {
     order,
     sent_to: sentTo,
     customer_notified: Boolean(sentTo),
-    tracking_link: order.tracking_link,
+    tracking_link: lalamoveTrackingLink || order.tracking_link,
     contact_channel: canSendToTelegram ? "telegram" : "tracking_page_only",
     warning:
       !canSendToTelegram

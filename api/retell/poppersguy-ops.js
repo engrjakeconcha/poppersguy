@@ -971,6 +971,31 @@ function sanitizeLalamoveText(value, fallback, maxLength = 1500) {
   return normalized.slice(0, maxLength);
 }
 
+function parseEnvList(value) {
+  return String(value || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function buildLalamoveItemDetails(items = []) {
+  const normalizedItems = Array.isArray(items) ? items : [];
+  const quantity = normalizedItems.reduce((sum, item) => sum + Number(item?.qty || 0), 0) || 1;
+  const categories = ["OTHERS"];
+  const names = normalizedItems
+    .map((item) => sanitizeLalamoveText(item?.name, "", 40))
+    .filter(Boolean)
+    .slice(0, 4);
+  const handlingInstructions = parseEnvList(process.env.POPPERS_LALAMOVE_HANDLING_INSTRUCTIONS);
+  return {
+    quantity: String(quantity),
+    weight: String(process.env.POPPERS_LALAMOVE_ITEM_WEIGHT || "LESS_THAN_3KG").trim(),
+    categories,
+    handlingInstructions,
+    names,
+  };
+}
+
 function extractLalamoveErrorMessage(payload, status) {
   if (!payload) {
     return `Lalamove request failed with status ${status}`;
@@ -1752,6 +1777,8 @@ async function getCheckoutLalamoveQuote(checkout, cart, options = {}) {
     )
       .trim()
       .toUpperCase();
+    const itemDetails = buildLalamoveItemDetails(cart.items || []);
+    const specialRequests = parseEnvList(process.env.POPPERS_LALAMOVE_SPECIAL_REQUESTS);
     const buildBody = (serviceType) => ({
       lalamove: {
         market: "PH",
@@ -1768,8 +1795,15 @@ async function getCheckoutLalamoveQuote(checkout, cart, options = {}) {
           },
         ],
         item: {
-          quantity: String((cart.items || []).reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1),
+          quantity: itemDetails.quantity,
+          weight: itemDetails.weight,
+          categories: itemDetails.categories,
+          ...(itemDetails.handlingInstructions.length
+            ? { handlingInstructions: itemDetails.handlingInstructions }
+            : {}),
         },
+        ...(specialRequests.length ? { specialRequests } : {}),
+        isRouteOptimized: false,
       },
     });
     let result = await handleLalamoveQuote(buildBody(configuredServiceType));
@@ -1796,6 +1830,12 @@ async function getCheckoutLalamoveQuote(checkout, cart, options = {}) {
         String(result.data?.data?.priceBreakdown?.currency || result.data?.priceBreakdown?.currency || "PHP").trim() ||
         "PHP",
       stops: result.data?.data?.stops || result.data?.stops || [],
+      expires_at: String(result.data?.data?.expiresAt || result.data?.expiresAt || "").trim(),
+      price_breakdown: result.data?.data?.priceBreakdown || result.data?.priceBreakdown || null,
+      distance: result.data?.data?.distance || result.data?.distance || null,
+      special_requests: result.data?.data?.specialRequests || specialRequests,
+      service_type: String(result.data?.data?.serviceType || configuredServiceType).trim(),
+      item: itemDetails,
       pickup,
     };
   } catch (error) {
@@ -1819,6 +1859,8 @@ async function placeCheckoutLalamoveOrder(quote, checkout, orderId) {
   const recipientStop = quote.lalamove.stops[1];
   const senderPhone = normalizeLalamovePhone(quote.lalamove.pickup?.phone || "09088960308", "PH");
   const recipientPhone = normalizeLalamovePhone(checkout.delivery_contact, "PH");
+  const itemDetails = buildLalamoveItemDetails(quote.items || []);
+  const itemSummary = itemDetails.names.length ? itemDetails.names.join(", ") : "store order";
   if (!senderPhone || !recipientPhone) {
     return {
       ok: false,
@@ -1841,15 +1883,22 @@ async function placeCheckoutLalamoveOrder(quote, checkout, orderId) {
           name: sanitizeLalamoveText(checkout.delivery_name, "Customer", 100),
           phone: recipientPhone,
           remarks: sanitizeLalamoveText(
-            [`Order ${orderId}`, checkout.delivery_address].filter(Boolean).join(" | "),
+            [`Order ${orderId}`, itemSummary, checkout.delivery_address].filter(Boolean).join(" | "),
             `Order ${orderId}`,
             300
           ),
         },
       ],
+      isPODEnabled: String(process.env.POPPERS_LALAMOVE_ENABLE_POD || "true").trim().toLowerCase() !== "false",
+      ...(String(process.env.POPPERS_LALAMOVE_PARTNER || "").trim()
+        ? { partner: String(process.env.POPPERS_LALAMOVE_PARTNER || "").trim() }
+        : {}),
       metadata: {
         storefrontOrderId: String(orderId || "").trim(),
         deliveryAddress: sanitizeLalamoveText(checkout.delivery_address, "", 250),
+        deliveryArea: sanitizeLalamoveText(checkout.delivery_area, "", 80),
+        paymentMethod: sanitizeLalamoveText(checkout.payment_method, "", 60),
+        items: itemSummary,
       },
     },
   });
@@ -1865,6 +1914,11 @@ async function placeCheckoutLalamoveOrder(quote, checkout, orderId) {
     ok: true,
     order_id: String(result.data?.data?.orderId || result.data?.orderId || "").trim(),
     quotation_id: String(result.data?.data?.quotationId || result.data?.quotationId || "").trim(),
+    share_link: extractLalamoveTrackingLink(result.data),
+    status: String(result.data?.data?.status || result.data?.status || "").trim(),
+    driver_id: String(result.data?.data?.driverId || result.data?.driverId || "").trim(),
+    price_breakdown: result.data?.data?.priceBreakdown || result.data?.priceBreakdown || null,
+    distance: result.data?.data?.distance || result.data?.distance || null,
     raw: result.data,
   };
 }
@@ -2219,6 +2273,12 @@ async function handleQuoteOrder(body) {
               currency: lalamove.currency,
               stops: lalamove.stops,
               pickup: lalamove.pickup,
+              expires_at: lalamove.expires_at,
+              price_breakdown: lalamove.price_breakdown,
+              distance: lalamove.distance,
+              special_requests: lalamove.special_requests || [],
+              service_type: lalamove.service_type || "",
+              item: lalamove.item || null,
             }
           : null,
       warnings,
