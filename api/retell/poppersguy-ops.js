@@ -800,6 +800,41 @@ function getTelegramId(customer) {
     .replace(/^@/, "");
 }
 
+function resolveSupportContact(customer = {}, details = {}) {
+  const requestedChannel = String(details.contact_channel || details.channel || "").trim().toLowerCase();
+  const requestedValue = String(details.contact_value || details.contact_id || details.contact_number || "").trim();
+  const inferredTelegram = getTelegramId(customer);
+
+  if (requestedChannel === "telegram") {
+    return {
+      contact_channel: "telegram",
+      contact_value: requestedValue || inferredTelegram,
+    };
+  }
+  if (requestedChannel === "viber" || requestedChannel === "whatsapp") {
+    return {
+      contact_channel: requestedChannel,
+      contact_value: requestedValue,
+    };
+  }
+  if (requestedValue) {
+    return {
+      contact_channel: requestedChannel || "telegram",
+      contact_value: requestedValue,
+    };
+  }
+  if (inferredTelegram) {
+    return {
+      contact_channel: "telegram",
+      contact_value: inferredTelegram,
+    };
+  }
+  return {
+    contact_channel: requestedChannel,
+    contact_value: "",
+  };
+}
+
 function getRetellCallKey(body) {
   const call = body?._retell?.call;
   if (!call || typeof call !== "object") {
@@ -3057,8 +3092,8 @@ async function handleSubmitSurvey(body) {
 
 async function handleSupportTicket(body) {
   const customer = body.customer || {};
-  const telegramId = getTelegramId(customer);
   const message = String(body.support?.message || "").trim();
+  const contact = resolveSupportContact(customer, body.support || {});
   if (!message) {
     return {
       ok: false,
@@ -3067,55 +3102,92 @@ async function handleSupportTicket(body) {
       error_code: "MISSING_SUPPORT_MESSAGE",
     };
   }
-  if (!telegramId) {
+  if (!contact.contact_channel || !contact.contact_value) {
     return {
       ok: false,
       action: "create_support_ticket",
-      message: "Telegram ID or Telegram username is required before submitting a support ticket.",
-      error_code: "MISSING_TELEGRAM_ID",
+      message:
+        "Before I submit the support ticket, how should support contact you: Telegram, Viber, or WhatsApp? Please also share the number or user ID.",
+      error_code: "MISSING_SUPPORT_CONTACT",
     };
   }
+  const ticketId = await logTicketRecord(
+    "customer_service",
+    customer,
+    [
+      `Contact Channel: ${contact.contact_channel}`,
+      `Contact Value: ${contact.contact_value}`,
+      `Message: ${message}`,
+    ].join("\n")
+  );
+  const trackingNumber = ticketId;
   const text = [
     "Customer service ticket",
+    `Tracking Number: ${trackingNumber}`,
     `Name: ${customer.name || "-"}`,
     `Username: ${customer.username ? `@${customer.username}` : "-"}`,
-    `Telegram ID: ${telegramId}`,
+    `Contact Channel: ${contact.contact_channel}`,
+    `Contact Value: ${contact.contact_value}`,
     `Message: ${message}`,
   ].join("\n");
-  const ticketId = await logTicketRecord("customer_service", customer, message);
   await notifyAdmins(text);
   return {
     ok: true,
     action: "create_support_ticket",
     message: "Support ticket sent successfully.",
-    data: { notified: true, ticket_id: ticketId },
+    data: {
+      notified: true,
+      ticket_id: ticketId,
+      tracking_number: trackingNumber,
+      contact_channel: contact.contact_channel,
+    },
   };
 }
 
 async function handleBulkOrder(body) {
   const customer = body.customer || {};
   const bulk = body.bulk_order || {};
+  const contact = resolveSupportContact(customer, bulk);
+  if (!contact.contact_channel || !contact.contact_value) {
+    return {
+      ok: false,
+      action: "create_bulk_order_ticket",
+      message:
+        "Before I submit the bulk order request, how should we contact you: Telegram, Viber, or WhatsApp? Please also share the number or user ID.",
+      error_code: "MISSING_BULK_ORDER_CONTACT",
+    };
+  }
   const ticketMessage = [
     `Requested Items: ${bulk.requested_items || "-"}`,
     `Target Date: ${bulk.target_date || "-"}`,
+    `Contact Channel: ${contact.contact_channel}`,
+    `Contact Value: ${contact.contact_value}`,
     `Message: ${bulk.message || "-"}`,
   ].join("\n");
+  const ticketId = await logTicketRecord("bulk_order", customer, ticketMessage);
+  const trackingNumber = ticketId;
   const text = [
     "Bulk order request",
+    `Tracking Number: ${trackingNumber}`,
     `Name: ${customer.name || "-"}`,
     `Username: ${customer.username ? `@${customer.username}` : "-"}`,
-    `Telegram ID: ${customer.telegram_user_id || "-"}`,
+    `Contact Channel: ${contact.contact_channel}`,
+    `Contact Value: ${contact.contact_value}`,
     `Requested Items: ${bulk.requested_items || "-"}`,
     `Target Date: ${bulk.target_date || "-"}`,
     `Message: ${bulk.message || "-"}`,
   ].join("\n");
-  const ticketId = await logTicketRecord("bulk_order", customer, ticketMessage);
   await notifyAdmins(text);
   return {
     ok: true,
     action: "create_bulk_order_ticket",
     message: "Bulk order request sent successfully.",
-    data: { notified: true, ticket_id: ticketId },
+    data: {
+      notified: true,
+      ticket_id: ticketId,
+      tracking_number: trackingNumber,
+      contact_channel: contact.contact_channel,
+    },
   };
 }
 

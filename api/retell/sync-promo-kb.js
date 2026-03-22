@@ -83,40 +83,6 @@ async function getGoogleAccessToken() {
   return payload.access_token;
 }
 
-async function fetchActivePromos() {
-  const spreadsheetId = String(process.env.GSHEET_ID || DEFAULT_GSHEET_ID).trim();
-  const accessToken = await getGoogleAccessToken();
-  const range = encodeURIComponent("Promos!A:C");
-  const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}`, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/json",
-    },
-  });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.error?.message || "Failed to load promo sheet");
-  }
-
-  const rows = Array.isArray(payload.values) ? payload.values : [];
-  const [headers, ...bodyRows] = rows;
-  const headerMap = Array.isArray(headers) ? headers.map((value) => String(value || "").trim().toLowerCase()) : [];
-  const codeIndex = headerMap.indexOf("code");
-  const discountIndex = headerMap.indexOf("discount");
-  const activeIndex = headerMap.indexOf("active");
-
-  return bodyRows
-    .map((row) => {
-      const code = String(row?.[codeIndex] || "").trim().toUpperCase();
-      const discount = Number(row?.[discountIndex] || 0);
-      const active = ["yes", "true", "1", "active"].includes(
-        String(row?.[activeIndex] || "").trim().toLowerCase()
-      );
-      return { code, discount, active };
-    })
-    .filter((promo) => promo.code && promo.active);
-}
-
 async function retellRequest(path, { method = "GET", body, formBody } = {}) {
   const apiKey = String(process.env.RETELL_API_KEY || "").trim();
   if (!apiKey) {
@@ -149,26 +115,6 @@ async function retellRequest(path, { method = "GET", body, formBody } = {}) {
   return payload;
 }
 
-function buildKnowledgeBaseTexts(promos) {
-  const texts = [
-    {
-      title: "PoppersGuyPH Promo Code Rules",
-      text:
-        "Promo codes for PoppersGuyPH must match an active code from the Promos Google Sheet. " +
-        "If a code is active, apply the listed peso discount up to the order subtotal. " +
-        "If the code is missing or inactive, tell the customer it is not active.",
-    },
-  ];
-
-  for (const promo of promos) {
-    texts.push({
-      title: `Promo Code ${promo.code}`,
-      text: `Promo code ${promo.code} is active and gives PHP ${Number(promo.discount || 0).toFixed(0)} off the order total before loyalty redemption.`,
-    });
-  }
-  return texts;
-}
-
 module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
     return sendJson(res, 405, {
@@ -187,26 +133,20 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const promos = await fetchActivePromos();
     const kbName = process.env.RETELL_PROMO_KB_NAME || "Poppers Promos";
     const llmId = process.env.RETELL_LLM_ID || DEFAULT_RETELL_LLM_ID;
-    const texts = buildKnowledgeBaseTexts(promos);
-
-    const createdKb = await retellRequest("/create-knowledge-base", {
-      method: "POST",
-      formBody: {
-        knowledge_base_name: kbName,
-        knowledge_base_texts: JSON.stringify(texts),
-      },
-    });
 
     const [llm, allKbs] = await Promise.all([
       retellRequest(`/get-retell-llm/${llmId}`),
       retellRequest("/list-knowledge-bases"),
     ]);
 
-    const promoKbIds = (allKbs || [])
-      .filter((kb) => String(kb.knowledge_base_name || "").startsWith(kbName))
+    const promoKbs = (allKbs || [])
+      .filter((kb) => {
+        const name = String(kb.knowledge_base_name || "").trim();
+        return name === kbName || /promo/i.test(name);
+      });
+    const promoKbIds = promoKbs
       .map((kb) => kb.knowledge_base_id)
       .filter(Boolean);
 
@@ -223,24 +163,41 @@ module.exports = async function handler(req, res) {
         tool_call_strict_mode: llm.tool_call_strict_mode,
         start_speaker: llm.start_speaker,
         kb_config: llm.kb_config,
-        knowledge_base_ids: [...preservedIds, createdKb.knowledge_base_id],
+        knowledge_base_ids: preservedIds,
       },
     });
 
+    const deleteResults = await Promise.all(
+      promoKbIds.map(async (knowledgeBaseId) => {
+        try {
+          await retellRequest(`/delete-knowledge-base/${knowledgeBaseId}`, {
+            method: "DELETE",
+          });
+          return { knowledge_base_id: knowledgeBaseId, deleted: true };
+        } catch (error) {
+          return {
+            knowledge_base_id: knowledgeBaseId,
+            deleted: false,
+            message: error instanceof Error ? error.message : "Delete failed.",
+          };
+        }
+      })
+    );
+
     return sendJson(res, 200, {
       ok: true,
-      message: "Promo knowledge base synced successfully.",
+      message: "Promo knowledge bases removed successfully.",
       data: {
-        promos_synced: promos.length,
-        knowledge_base_id: createdKb.knowledge_base_id,
         llm_id: updatedLlm.llm_id,
-        knowledge_base_ids: updatedLlm.knowledge_base_ids || [...preservedIds, createdKb.knowledge_base_id],
+        removed_knowledge_base_ids: promoKbIds,
+        knowledge_base_ids: updatedLlm.knowledge_base_ids || preservedIds,
+        delete_results: deleteResults,
       },
     });
   } catch (error) {
     return sendJson(res, 500, {
       ok: false,
-      message: error instanceof Error ? error.message : "Promo KB sync failed.",
+      message: error instanceof Error ? error.message : "Promo KB removal failed.",
     });
   }
 };
