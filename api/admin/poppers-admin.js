@@ -713,44 +713,6 @@ async function handleVerifyPayment(body, admin) {
     tracking_link: "",
   };
 
-  if (
-    updated.delivery_method === "Lalamove" &&
-    updated.payment_method !== "Cash on Delivery" &&
-    !String(updated.tracking_number || "").trim()
-  ) {
-    booking.attempted = true;
-    const checkout = {
-      delivery_name: updated.delivery_name,
-      delivery_address: updated.delivery_address,
-      delivery_contact: updated.delivery_contact,
-      delivery_area: updated.delivery_area,
-      payment_method: updated.payment_method,
-      delivery_method: updated.delivery_method,
-    };
-    const cart = { items: Array.isArray(updated.items) ? updated.items : [] };
-    try {
-      const quote = await getCheckoutLalamoveQuote(checkout, cart, {
-        pickup_point: body.pickup_point || "jay",
-      });
-      if (quote?.ok) {
-        const lalamoveOrder = await placeCheckoutLalamoveOrder({ lalamove: quote, items: cart.items }, checkout, updated.order_id);
-        if (lalamoveOrder?.ok && lalamoveOrder.order_id) {
-          updated.tracking_number = lalamoveOrder.order_id;
-          booking.booked = true;
-          booking.order_id = lalamoveOrder.order_id;
-          booking.tracking_link = await getLalamoveTrackingLink(lalamoveOrder.order_id);
-          booking.pickup = quote.pickup || null;
-        } else {
-          booking.error = lalamoveOrder?.message || "Lalamove booking failed.";
-        }
-      } else {
-        booking.error = quote?.warning || "Lalamove quote failed.";
-      }
-    } catch (error) {
-      booking.error = error instanceof Error ? error.message : "Lalamove booking failed.";
-    }
-  }
-
   await updateRecordRow("Orders", entry.rowNumber, buildOrderRowFromView(updated));
 
   const targetId = String(updated.user_id || "").trim();

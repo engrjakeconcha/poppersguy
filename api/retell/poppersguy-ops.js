@@ -2425,17 +2425,6 @@ async function handleSubmitOrder(body) {
     tracking_number: "",
   };
 
-  if (order.delivery_method === "Lalamove" && quote.data?.lalamove) {
-    try {
-      const lalamoveOrder = await placeCheckoutLalamoveOrder(quote.data, checkout, order.order_id);
-      if (lalamoveOrder?.ok && lalamoveOrder.order_id) {
-        order.tracking_number = lalamoveOrder.order_id;
-      }
-    } catch (_) {
-      // Lalamove booking failures are surfaced later in notifications.
-    }
-  }
-
   const adminText = [
     `New order *${order.order_id}*`,
     `Customer: ${order.full_name || "-"}${order.username ? ` (@${order.username})` : ""}`,

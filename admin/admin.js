@@ -325,16 +325,10 @@ function bindOrderCard(entry, node) {
         Object.assign(entry, resultWithPickup.order || {});
         set(".admin-order-card__status", entry.status || "Confirmed");
         setValue(".admin-order-card__status-input", entry.status || "Confirmed");
-        const pickupLabel = resultWithPickup.booking?.booked
-          ? resultWithPickup.booking?.pickup?.label ||
-            (String(pickupInput?.value || "jay") === "josh" ? "Josh • Vine Residences" : "Jay Concha")
-          : "";
         setCardFeedback(
-          pickupLabel
-            ? `Payment verified and auto-booked from ${pickupLabel}.`
-            : resultWithPickup.notifications?.customer_notified
-              ? "Payment verified and customer notified."
-              : "Payment verified. No Telegram customer notification was sent for this order.",
+          resultWithPickup.notifications?.customer_notified
+            ? "Payment verified. Use Book Lalamove when you are ready to dispatch."
+            : "Payment verified. No Telegram customer notification was sent for this order.",
           "success"
         );
         await refreshAdminData();
