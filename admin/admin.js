@@ -632,7 +632,7 @@ async function refreshAdminData() {
   }
   setFeedback("Loading admin data...", "", "admin-dashboard-feedback");
   try {
-    const [dashboard, report, tickets, promos, surveys, inventory, adminUsers] = await Promise.all([
+    const results = await Promise.allSettled([
       adminRequest("get_dashboard", {
         filter: state.orderFilter,
         search: state.orderSearch,
@@ -645,6 +645,25 @@ async function refreshAdminData() {
       adminRequest("get_inventory"),
       adminRequest("get_admin_users"),
     ]);
+
+    const warnings = [];
+    const readResult = (index, fallback, label) => {
+      const result = results[index];
+      if (result.status === "fulfilled") {
+        return result.value;
+      }
+      warnings.push(`${label}: ${result.reason instanceof Error ? result.reason.message : "failed to load"}`);
+      return fallback;
+    };
+
+    const dashboard = readResult(0, { summary: {}, orders: [] }, "Orders");
+    const report = readResult(1, { report: {} }, "Sales");
+    const tickets = readResult(2, { tickets: [] }, "Tickets");
+    const promos = readResult(3, { promos: [] }, "Promos");
+    const surveys = readResult(4, { surveys: [] }, "Surveys");
+    const inventory = readResult(5, { inventory: [] }, "Inventory");
+    const adminUsers = readResult(6, { admin_users: [] }, "Admins");
+
     state.summary = dashboard.summary || {};
     state.orders = dashboard.orders || [];
     state.report = report.report || {};
@@ -660,7 +679,7 @@ async function refreshAdminData() {
     renderSurveys();
     renderInventory();
     renderAdminUsers();
-    setFeedback("", "", "admin-dashboard-feedback");
+    setFeedback(warnings.length ? `Loaded with warnings: ${warnings.join(" | ")}` : "", warnings.length ? "error" : "", "admin-dashboard-feedback");
   } catch (error) {
     setFeedback(error instanceof Error ? error.message : "Failed to load admin data.", "error", "admin-dashboard-feedback");
   }
