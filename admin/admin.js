@@ -161,6 +161,10 @@ function bindOrderCard(entry, node) {
     }`
   );
   set(
+    ".admin-order-card__address",
+    `Delivery Address\n${entry.delivery_address || "-"}${entry.delivery_area ? `\n${entry.delivery_area}` : ""}`
+  );
+  set(
     ".admin-order-card__items",
     (entry.items || []).length
       ? (entry.items || []).map((item) => `${item.name} x${item.qty}`).join(" • ")
@@ -269,7 +273,11 @@ function bindOrderCard(entry, node) {
       bookLalamoveButton.hidden = true;
     }
     bookLalamoveButton.addEventListener("click", async () => {
-      const confirmed = window.confirm(`Book Lalamove for order ${entry.order_id}?`);
+      const confirmed = window.confirm(
+        `Book Lalamove for order ${entry.order_id}?\n\nDelivery address:\n${entry.delivery_address || "-"}${
+          entry.delivery_area ? `\n${entry.delivery_area}` : ""
+        }`
+      );
       if (!confirmed) {
         return;
       }
@@ -287,7 +295,12 @@ function bindOrderCard(entry, node) {
         const pickupLabel =
           resultWithPickup.booking?.pickup?.label ||
           (String(pickupInput?.value || "jay") === "josh" ? "Josh • Vine Residences" : "Jay Concha");
-        setCardFeedback(`Lalamove booked from ${pickupLabel}.`, "success");
+        setCardFeedback(
+          `Lalamove booked from ${pickupLabel}.\nDrop-off: ${entry.delivery_address || "-"}${
+            entry.delivery_area ? ` • ${entry.delivery_area}` : ""
+          }`,
+          "success"
+        );
         await refreshAdminData();
       } catch (error) {
         setCardFeedback(error instanceof Error ? error.message : "Failed to book Lalamove.", "error");

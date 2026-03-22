@@ -846,6 +846,8 @@ async function handleBookLalamove(body, admin) {
     booked: false,
     tracking_link: "",
     pickup_point: String(body.pickup_point || "jay").trim().toLowerCase(),
+    delivery_address: updated.delivery_address,
+    delivery_area: updated.delivery_area,
   };
 
   try {
@@ -910,6 +912,8 @@ async function handleBookLalamove(body, admin) {
       `Admin: ${admin.username}`,
       `Order: ${updated.order_id}`,
       `Pickup Point: ${booking.pickup_point}`,
+      `Delivery Address: ${updated.delivery_address || "-"}`,
+      updated.delivery_area ? `Delivery Area: ${updated.delivery_area}` : "",
       `Lalamove order: ${booking.order_id || "-"}`,
       booking.tracking_link ? `Tracking: ${booking.tracking_link}` : "",
       notifications.customer_notified ? "Customer notified: yes" : notifications.customer_error ? `Customer notify error: ${notifications.customer_error}` : "Customer notified: no",

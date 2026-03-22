@@ -386,6 +386,17 @@ body.has-order-success {
   line-height: 1.55;
 }
 
+.admin-order-card__address {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text);
+  line-height: 1.55;
+  white-space: pre-line;
+}
+
 .admin-order-card__totals {
   display: flex;
   flex-wrap: wrap;
