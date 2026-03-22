@@ -2195,7 +2195,7 @@ function mapLalamoveStatusToOrderStatus(lalamoveStatus, currentStatus = "") {
     return current;
   }
   if (normalized === "COMPLETED") {
-    return current === "Completed" ? "Completed" : "Delivered";
+    return "Completed";
   }
   if (["CANCELED", "CANCELLED", "REJECTED", "EXPIRED"].includes(normalized)) {
     return "Cancelled";
