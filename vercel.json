@@ -1,0 +1,22 @@
+{
+  "cleanUrls": true,
+  "rewrites": [
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "poppers.jcit.digital" }],
+      "destination": "/poppers/index.html"
+    },
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "project-jaz0l.vercel.app" }],
+      "destination": "/poppers/index.html"
+    },
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "project-jaz0l-jakeconcha-7757s-projects.vercel.app" }],
+      "destination": "/poppers/index.html"
+    },
+    { "source": "/delu", "destination": "/delu/index.html" },
+    { "source": "/poppers", "destination": "/poppers/index.html" }
+  ]
+}
