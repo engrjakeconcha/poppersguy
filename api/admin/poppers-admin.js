@@ -1216,10 +1216,25 @@ async function handleLogin(body) {
   if (!admin) {
     return { ok: false, action: "login", error_code: "INVALID_ADMIN_LOGIN", message: "Invalid admin login." };
   }
+  const loginAtIso = nowIso();
+  const loginAtManila = new Intl.DateTimeFormat("en-PH", {
+    dateStyle: "full",
+    timeStyle: "long",
+    timeZone: "Asia/Manila",
+  }).format(new Date(loginAtIso));
+  await notifyAdminChat(
+    [
+      "Admin portal login",
+      `Admin: ${admin.username}`,
+      `Date/Time (Asia/Manila): ${loginAtManila}`,
+      `Timestamp (UTC): ${loginAtIso}`,
+    ].join("\n")
+  );
   return {
     ok: true,
     action: "login",
     admin,
+    login_at: loginAtIso,
     two_factor: {
       available: false,
       message: "Telegram-native 2FA is not available through the Bot API. A Telegram OTP step can be added next.",
