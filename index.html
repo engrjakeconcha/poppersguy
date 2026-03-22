@@ -3,24 +3,48 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Storefront</title>
+    <title>PoppersGuyPH Catalog</title>
     <meta
       name="description"
-      content="Browse deluLubes and PoppersGuyPH catalogs inside Telegram or on the web."
+      content="Browse PoppersGuyPH products inside Telegram or on the web."
     />
     <link rel="stylesheet" href="/styles.css" />
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script
+      id="retell-widget"
+      src="https://dashboard.retellai.com/retell-widget.js"
+      type="module"
+      data-public-key="public_key_b16031bf6fd0c0d9f2be9"
+      data-agent-id="agent_75c854665db40f81ec86c5ba82"
+      data-agent-version="14"
+      data-title="PoppersGuyPH Concierge"
+      data-logo-url="https://raw.githubusercontent.com/jcitservices-ai/delulubes/main/poppersguyph/assets/pgphlogo.png"
+      data-color="#c81d39"
+      data-bot-name="PoppersGuyPH Concierge"
+      data-popup-message="Ask about products, promo codes, or same-day delivery."
+      data-show-ai-popup="true"
+      data-show-ai-popup-time="5"
+      data-auto-open="false"
+    ></script>
     <script>
       (function () {
-        const host = window.location.hostname.replace(/^www\./, "").toLowerCase();
-        const poppersHosts = new Set([
-          "poppers.jcit.digital",
-          "project-jaz0l.vercel.app",
-          "project-jaz0l-jakeconcha-7757s-projects.vercel.app",
-        ]);
-        if (poppersHosts.has(host) && window.location.pathname === "/") {
-          window.location.replace(`/poppers${window.location.search}${window.location.hash}`);
+        const params = new URLSearchParams(window.location.search);
+        if (params.get("open_chat") !== "1") {
+          return;
         }
+        window.addEventListener("load", () => {
+          setTimeout(() => {
+            const launcher =
+              document.querySelector('[aria-label*="chat" i]') ||
+              document.querySelector('[aria-label*="assistant" i]') ||
+              document.querySelector("#retell-widget-launcher") ||
+              document.querySelector("retell-widget") ||
+              document.querySelector("button[data-retell-launcher]");
+            if (launcher && typeof launcher.click === "function") {
+              launcher.click();
+            }
+          }, 1200);
+        });
       })();
     </script>
   </head>
@@ -41,9 +65,11 @@
           <div class="hero__actions">
             <button id="copy-link" class="cta cta--secondary" type="button">Copy Store Link</button>
           </div>
-          <div id="chat-status" class="chat-status" hidden>
-            <span id="chat-status-label" class="pill pill--ghost">Live chat unavailable</span>
-            <p id="chat-status-copy" class="chat-status__copy"></p>
+          <div class="chat-status">
+            <span class="pill pill--ghost">Live chat enabled</span>
+            <p class="chat-status__copy">
+              Use the chat bubble to ask questions, place orders, or request delivery help.
+            </p>
           </div>
         </div>
       </header>
@@ -75,6 +101,7 @@
           <p class="product-card__description"></p>
           <div class="product-card__footer">
             <strong class="product-card__price"></strong>
+            <button class="product-card__button" type="button">Checkout with AI</button>
           </div>
         </div>
       </article>
