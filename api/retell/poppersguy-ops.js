@@ -936,6 +936,70 @@ function normalizePhone(value) {
   return String(value || "").replace(/\D/g, "");
 }
 
+function normalizeLalamovePhone(value, market = "PH") {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const normalizedMarket = String(market || "PH").trim().toUpperCase();
+  if (/^\+[1-9]\d{1,14}$/.test(raw)) {
+    return raw;
+  }
+  const digits = raw.replace(/\D/g, "");
+  if (!digits) {
+    return "";
+  }
+  if (normalizedMarket === "PH") {
+    if (digits.startsWith("63") && digits.length >= 12) {
+      return `+${digits}`;
+    }
+    if (digits.startsWith("0") && digits.length === 11) {
+      return `+63${digits.slice(1)}`;
+    }
+    if (digits.startsWith("9") && digits.length === 10) {
+      return `+63${digits}`;
+    }
+  }
+  return digits.startsWith("+") ? digits : `+${digits}`;
+}
+
+function sanitizeLalamoveText(value, fallback, maxLength = 1500) {
+  const normalized = String(value || fallback || "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return String(fallback || "").trim();
+  }
+  return normalized.slice(0, maxLength);
+}
+
+function extractLalamoveErrorMessage(payload, status) {
+  if (!payload) {
+    return `Lalamove request failed with status ${status}`;
+  }
+  const candidates = [
+    payload.message,
+    payload.error,
+    payload.raw,
+    payload.data?.message,
+    payload.data?.error,
+    payload.data?.reason,
+    payload.data?.errorMessage,
+    payload.data?.details,
+  ];
+  for (const candidate of candidates) {
+    const text = String(candidate || "").trim();
+    if (text) {
+      return text;
+    }
+  }
+  if (Array.isArray(payload.errors) && payload.errors.length) {
+    return payload.errors
+      .map((entry) => String(entry?.message || entry?.reason || entry?.code || "").trim())
+      .filter(Boolean)
+      .join("; ");
+  }
+  return `Lalamove request failed with status ${status}`;
+}
+
 function parseOrderCreatedAt(order) {
   const timestamp = Date.parse(String(order.created_at || "").trim());
   return Number.isFinite(timestamp) ? timestamp : 0;
@@ -1668,82 +1732,124 @@ async function geocodeAddress(address) {
 }
 
 async function getCheckoutLalamoveQuote(checkout, cart, options = {}) {
-  if (String(checkout?.delivery_area || "").trim() !== "Metro Manila") {
+  if (String(checkout?.delivery_area || "").trim().toLowerCase() !== "metro manila") {
     return null;
   }
   if (getCheckoutDeliveryMethod(checkout) !== "Lalamove") {
     return null;
   }
-  const pickup = await getLalamovePickupConfig(options.pickup_point || checkout?.pickup_point || "jay");
-  if (!pickup) {
-    return {
-      ok: false,
-      warning: "Same-day delivery is not configured yet.",
-    };
-  }
-  const recipientCoords = await geocodeAddress(checkout.delivery_address);
-  const body = {
-    lalamove: {
-      market: "PH",
-      serviceType: String(process.env.POPPERS_LALAMOVE_SERVICE_TYPE || DEFAULT_LALAMOVE_SERVICE_TYPE).trim(),
-      language: "en_PH",
-      stops: [
-        {
-          coordinates: pickup.coordinates,
-          address: pickup.address,
+  try {
+    const pickup = await getLalamovePickupConfig(options.pickup_point || checkout?.pickup_point || "jay");
+    if (!pickup) {
+      return {
+        ok: false,
+        warning: "Same-day delivery is not configured yet.",
+      };
+    }
+    const recipientCoords = await geocodeAddress(checkout.delivery_address);
+    const configuredServiceType = String(
+      process.env.POPPERS_LALAMOVE_SERVICE_TYPE || DEFAULT_LALAMOVE_SERVICE_TYPE
+    )
+      .trim()
+      .toUpperCase();
+    const buildBody = (serviceType) => ({
+      lalamove: {
+        market: "PH",
+        serviceType,
+        language: "en_PH",
+        stops: [
+          {
+            coordinates: pickup.coordinates,
+            address: pickup.address,
+          },
+          {
+            coordinates: recipientCoords,
+            address: checkout.delivery_address,
+          },
+        ],
+        item: {
+          quantity: String((cart.items || []).reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1),
         },
-        {
-          coordinates: recipientCoords,
-          address: checkout.delivery_address,
-        },
-      ],
-      item: {
-        quantity: String((cart.items || []).reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1),
       },
-    },
-  };
-  const result = await handleLalamoveQuote(body);
-  if (!result.ok) {
+    });
+    let result = await handleLalamoveQuote(buildBody(configuredServiceType));
+    if (
+      !result.ok &&
+      String(result.message || "").includes("ERR_INVALID_SERVICE_TYPE") &&
+      configuredServiceType !== DEFAULT_LALAMOVE_SERVICE_TYPE
+    ) {
+      result = await handleLalamoveQuote(buildBody(DEFAULT_LALAMOVE_SERVICE_TYPE));
+    }
+    if (!result.ok) {
+      return {
+        ok: false,
+        warning: result.message || "Same-day delivery quote failed.",
+        error_code: result.error_code || "LALAMOVE_QUOTE_FAILED",
+        data: result.data || null,
+      };
+    }
+    return {
+      ok: true,
+      quotation_id: String(result.data?.data?.quotationId || result.data?.quotationId || "").trim(),
+      quoted_total: parseMoney(result.data?.quoted_total || 0),
+      currency:
+        String(result.data?.data?.priceBreakdown?.currency || result.data?.priceBreakdown?.currency || "PHP").trim() ||
+        "PHP",
+      stops: result.data?.data?.stops || result.data?.stops || [],
+      pickup,
+    };
+  } catch (error) {
     return {
       ok: false,
-      warning: result.message || "Same-day delivery quote failed.",
+      warning: error instanceof Error ? error.message : "Same-day delivery quote failed.",
+      error_code: "LALAMOVE_QUOTE_FAILED",
     };
   }
-  return {
-    ok: true,
-    quotation_id: String(result.data?.data?.quotationId || result.data?.quotationId || "").trim(),
-    quoted_total: parseMoney(result.data?.quoted_total || 0),
-    currency: String(result.data?.currency || "PHP").trim(),
-    stops: result.data?.data?.stops || result.data?.stops || [],
-    pickup,
-  };
 }
 
 async function placeCheckoutLalamoveOrder(quote, checkout, orderId) {
   if (!quote?.lalamove?.quotation_id || !Array.isArray(quote.lalamove.stops) || quote.lalamove.stops.length < 2) {
-    return null;
+    return {
+      ok: false,
+      message: "Lalamove quotation details are missing.",
+      error_code: "LALAMOVE_QUOTE_MISSING",
+    };
   }
   const senderStop = quote.lalamove.stops[0];
   const recipientStop = quote.lalamove.stops[1];
+  const senderPhone = normalizeLalamovePhone(quote.lalamove.pickup?.phone || "09088960308", "PH");
+  const recipientPhone = normalizeLalamovePhone(checkout.delivery_contact, "PH");
+  if (!senderPhone || !recipientPhone) {
+    return {
+      ok: false,
+      message: "A valid pickup and delivery contact number is required for Lalamove.",
+      error_code: "LALAMOVE_INVALID_PHONE",
+    };
+  }
   const result = await handleLalamovePlaceOrder({
     lalamove: {
       market: "PH",
       quotationId: quote.lalamove.quotation_id,
       sender: {
         stopId: senderStop.stopId,
-        name: quote.lalamove.pickup?.name || "PoppersGuyPH",
-        phone: quote.lalamove.pickup?.phone || "09088960308",
+        name: sanitizeLalamoveText(quote.lalamove.pickup?.name, "PoppersGuyPH", 100),
+        phone: senderPhone,
       },
       recipients: [
         {
           stopId: recipientStop.stopId,
-          name: checkout.delivery_name,
-          phone: checkout.delivery_contact,
-          remarks: `Order ${orderId}`,
+          name: sanitizeLalamoveText(checkout.delivery_name, "Customer", 100),
+          phone: recipientPhone,
+          remarks: sanitizeLalamoveText(
+            [`Order ${orderId}`, checkout.delivery_address].filter(Boolean).join(" | "),
+            `Order ${orderId}`,
+            300
+          ),
         },
       ],
       metadata: {
-        storefrontOrderId: orderId,
+        storefrontOrderId: String(orderId || "").trim(),
+        deliveryAddress: sanitizeLalamoveText(checkout.delivery_address, "", 250),
       },
     },
   });
@@ -1751,6 +1857,7 @@ async function placeCheckoutLalamoveOrder(quote, checkout, orderId) {
     return {
       ok: false,
       message: result.message || "Lalamove booking failed.",
+      error_code: result.error_code || "LALAMOVE_BOOKING_FAILED",
       data: result.data,
     };
   }
@@ -1787,51 +1894,57 @@ function getLalamoveCredentials() {
 }
 
 async function callLalamove({ method, path, market, body }) {
-  const { apiKey, apiSecret } = getLalamoveCredentials();
-  const timestamp = Date.now().toString();
-  const jsonBody = body ? compactJsonStringify(body) : "";
-  const rawSignature = `${timestamp}\r\n${method}\r\n${path}\r\n\r\n${jsonBody}`;
-  const signature = createHmac("sha256", apiSecret).update(rawSignature).digest("hex");
-  const token = `${apiKey}:${timestamp}:${signature}`;
-  const response = await fetch(`${getLalamoveBaseUrl()}${path}`, {
-    method,
-    headers: {
-      Authorization: `hmac ${token}`,
-      Market: market,
-      "Request-ID": randomUUID(),
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: jsonBody || undefined,
-  });
-
-  let payload = null;
-  const text = await response.text();
   try {
-    payload = text ? JSON.parse(text) : null;
-  } catch (_) {
-    payload = { raw: text };
-  }
+    const { apiKey, apiSecret } = getLalamoveCredentials();
+    const timestamp = Date.now().toString();
+    const jsonBody = body ? compactJsonStringify(body) : "";
+    const rawSignature = `${timestamp}\r\n${method}\r\n${path}\r\n\r\n${jsonBody}`;
+    const signature = createHmac("sha256", apiSecret).update(rawSignature).digest("hex");
+    const token = `${apiKey}:${timestamp}:${signature}`;
+    const response = await fetch(`${getLalamoveBaseUrl()}${path}`, {
+      method,
+      headers: {
+        Authorization: `hmac ${token}`,
+        Market: market,
+        "Request-ID": randomUUID(),
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: jsonBody || undefined,
+    });
 
-  if (!response.ok) {
-    const message =
-      payload?.message ||
-      payload?.error ||
-      payload?.raw ||
-      `Lalamove request failed with status ${response.status}`;
+    let payload = null;
+    const text = await response.text();
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch (_) {
+      payload = { raw: text };
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        message: extractLalamoveErrorMessage(payload, response.status),
+        error_code: String(payload?.message || payload?.error || "").trim() || "LALAMOVE_API_ERROR",
+        data: payload,
+      };
+    }
+
     return {
-      ok: false,
+      ok: true,
       status: response.status,
-      message,
       data: payload,
     };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      message: error instanceof Error ? error.message : "Lalamove request failed.",
+      error_code: "LALAMOVE_REQUEST_ERROR",
+      data: null,
+    };
   }
-
-  return {
-    ok: true,
-    status: response.status,
-    data: payload,
-  };
 }
 
 async function telegramSendMessage(chatId, text, options = {}) {
@@ -2742,7 +2855,7 @@ async function handleLalamoveQuote(body) {
       ok: false,
       action: "lalamove_quote",
       message: result.message,
-      error_code: "LALAMOVE_API_ERROR",
+      error_code: result.error_code || "LALAMOVE_API_ERROR",
       data: result.data,
     };
   }
@@ -2795,7 +2908,7 @@ async function handleLalamovePlaceOrder(body) {
       ok: false,
       action: "lalamove_place_order",
       message: result.message,
-      error_code: "LALAMOVE_API_ERROR",
+      error_code: result.error_code || "LALAMOVE_API_ERROR",
       data: result.data,
     };
   }
