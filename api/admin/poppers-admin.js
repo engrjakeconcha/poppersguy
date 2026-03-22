@@ -349,6 +349,13 @@ function normalizeReferralCode(value) {
   return normalized;
 }
 
+function normalizeOrderId(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+}
+
 function orderRecordToView(record) {
   const rawDeliveryMethod = String(record.delivery_method || "").trim();
   let normalizedRecord = { ...record };
@@ -428,6 +435,19 @@ async function readOrdersWithRows() {
       view: orderRecordToView(record),
     }))
     .sort((left, right) => parseDateSafe(right.view.created_at) - parseDateSafe(left.view.created_at));
+}
+
+function findOrderEntry(entries, orderId) {
+  const exactOrderId = String(orderId || "").trim().toUpperCase();
+  const normalizedOrderId = normalizeOrderId(orderId);
+  if (!exactOrderId && !normalizedOrderId) {
+    return null;
+  }
+  return (
+    entries.find((item) => String(item.view.order_id || "").trim().toUpperCase() === exactOrderId) ||
+    entries.find((item) => normalizeOrderId(item.view.order_id) === normalizedOrderId) ||
+    null
+  );
 }
 
 function buildOrderRowFromView(order) {
@@ -602,7 +622,7 @@ async function handleUpdateOrder(body, admin) {
     return { ok: false, action: "update_order", error_code: "MISSING_ORDER_ID", message: "Order ID is required." };
   }
   const entries = await readOrdersWithRows();
-  const entry = entries.find((item) => item.view.order_id.toUpperCase() === orderId.toUpperCase());
+  const entry = findOrderEntry(entries, orderId);
   if (!entry) {
     return { ok: false, action: "update_order", error_code: "ORDER_NOT_FOUND", message: "Order not found." };
   }
@@ -681,7 +701,7 @@ async function handleVerifyPayment(body, admin) {
   }
 
   const entries = await readOrdersWithRows();
-  const entry = entries.find((item) => item.view.order_id.toUpperCase() === orderId.toUpperCase());
+  const entry = findOrderEntry(entries, orderId);
   if (!entry) {
     return { ok: false, action: "verify_payment", error_code: "ORDER_NOT_FOUND", message: "Order not found." };
   }
@@ -789,7 +809,7 @@ async function handleBookLalamove(body, admin) {
   }
 
   const entries = await readOrdersWithRows();
-  const entry = entries.find((item) => item.view.order_id.toUpperCase() === orderId.toUpperCase());
+  const entry = findOrderEntry(entries, orderId);
   if (!entry) {
     return { ok: false, action: "book_lalamove", error_code: "ORDER_NOT_FOUND", message: "Order not found." };
   }
@@ -920,7 +940,7 @@ async function handleSendTrackingLink(body, admin) {
     };
   }
   const entries = await readOrdersWithRows();
-  const entry = entries.find((item) => item.view.order_id.toUpperCase() === orderId.toUpperCase());
+  const entry = findOrderEntry(entries, orderId);
   if (!entry) {
     return { ok: false, action: "send_tracking_link", error_code: "ORDER_NOT_FOUND", message: "Order not found." };
   }
@@ -997,7 +1017,7 @@ async function handleContactCustomer(body, admin) {
     };
   }
   const entries = await readOrdersWithRows();
-  const entry = entries.find((item) => item.view.order_id.toUpperCase() === orderId.toUpperCase());
+  const entry = findOrderEntry(entries, orderId);
   if (!entry) {
     return { ok: false, action: "contact_customer", error_code: "ORDER_NOT_FOUND", message: "Order not found." };
   }
@@ -1449,7 +1469,7 @@ async function handleUploadOrderPhotos(body, admin) {
   }
 
   const entries = await readOrdersWithRows();
-  const entry = entries.find((item) => item.view.order_id.toUpperCase() === orderId.toUpperCase());
+  const entry = findOrderEntry(entries, orderId);
   if (!entry) {
     return { ok: false, action: "upload_order_photos", error_code: "ORDER_NOT_FOUND", message: "Order not found." };
   }
