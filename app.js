@@ -956,22 +956,22 @@ async function loadAddressPage() {
   if (draft.delivery_address) {
     form.elements.delivery_address.value = draft.delivery_address;
   }
-  if (checkoutDraft.delivery_name) {
+  if (checkoutDraft.delivery_name && form.elements.delivery_name) {
     form.elements.delivery_name.value = checkoutDraft.delivery_name;
   }
-  if (checkoutDraft.telegram_id) {
+  if (checkoutDraft.telegram_id && form.elements.telegram_id) {
     form.elements.telegram_id.value = checkoutDraft.telegram_id;
   }
-  if (checkoutDraft.delivery_contact) {
+  if (checkoutDraft.delivery_contact && form.elements.delivery_contact) {
     form.elements.delivery_contact.value = checkoutDraft.delivery_contact;
   }
-  if (checkoutDraft.promo_code) {
+  if (checkoutDraft.promo_code && form.elements.promo_code) {
     form.elements.promo_code.value = checkoutDraft.promo_code;
   }
-  if (checkoutDraft.referral_code) {
+  if (checkoutDraft.referral_code && form.elements.referral_code) {
     form.elements.referral_code.value = checkoutDraft.referral_code;
   }
-  if (checkoutDraft.payment_method) {
+  if (checkoutDraft.payment_method && form.elements.payment_method) {
     form.elements.payment_method.value = checkoutDraft.payment_method;
   }
 
