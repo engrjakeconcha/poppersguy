@@ -135,6 +135,9 @@ let promoCache = {
   expiresAt: 0,
   promos: {},
 };
+const SHEET_CACHE_TTL_MS = 15 * 1000;
+const sheetRowsCache = new Map();
+const sheetRowsInFlight = new Map();
 const CART_SESSION_TTL_MS = 30 * 60 * 1000;
 const cartSessions = new Map();
 function sendJson(res, status, body) {
@@ -529,27 +532,69 @@ async function ensureSheetHeaders(sheetName) {
 async function appendRecordRow(sheetName, rowValues) {
   await ensureSheetHeaders(sheetName);
   const range = encodeURIComponent(`${sheetName}!A1`);
-  return callGoogleSheets(`/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
+  const result = await callGoogleSheets(`/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
     method: "POST",
     body: { majorDimension: "ROWS", values: [rowValues] },
   });
+  sheetRowsCache.delete(sheetName);
+  return result;
 }
 
 async function getRecordRows(sheetName) {
-  await ensureSheetHeaders(sheetName);
-  const range = encodeURIComponent(`${sheetName}!A:Z`);
-  const payload = await callGoogleSheets(`/values/${range}`);
-  return Array.isArray(payload.values) ? payload.values : [];
+  const cached = sheetRowsCache.get(sheetName);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.rows;
+  }
+  if (sheetRowsInFlight.has(sheetName)) {
+    return sheetRowsInFlight.get(sheetName);
+  }
+  const request = (async () => {
+    try {
+      await ensureSheetHeaders(sheetName);
+      const range = encodeURIComponent(`${sheetName}!A:Z`);
+      let lastError = null;
+      for (const delayMs of [0, 400, 1200]) {
+        if (delayMs) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+        try {
+          const payload = await callGoogleSheets(`/values/${range}`);
+          const rows = Array.isArray(payload.values) ? payload.values : [];
+          sheetRowsCache.set(sheetName, {
+            rows,
+            expiresAt: Date.now() + SHEET_CACHE_TTL_MS,
+          });
+          return rows;
+        } catch (error) {
+          lastError = error;
+          const message = String(error?.message || "");
+          if (!/quota|rate|429/i.test(message)) {
+            throw error;
+          }
+        }
+      }
+      if (cached?.rows?.length) {
+        return cached.rows;
+      }
+      throw lastError || new Error("Failed to load sheet rows.");
+    } finally {
+      sheetRowsInFlight.delete(sheetName);
+    }
+  })();
+  sheetRowsInFlight.set(sheetName, request);
+  return request;
 }
 
 async function updateRecordRow(sheetName, rowNumber, rowValues) {
   await ensureSheetHeaders(sheetName);
   const endColumn = String.fromCharCode(64 + rowValues.length);
   const range = encodeURIComponent(`${sheetName}!A${rowNumber}:${endColumn}${rowNumber}`);
-  return callGoogleSheets(`/values/${range}?valueInputOption=USER_ENTERED`, {
+  const result = await callGoogleSheets(`/values/${range}?valueInputOption=USER_ENTERED`, {
     method: "PUT",
     body: { majorDimension: "ROWS", values: [rowValues] },
   });
+  sheetRowsCache.delete(sheetName);
+  return result;
 }
 
 function mapSheetRows(rows) {
