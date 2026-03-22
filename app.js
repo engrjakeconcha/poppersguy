@@ -1169,12 +1169,23 @@ async function loadTrackingView() {
     const result = await storefrontCheckoutRequest(payload);
     const order = result.data || {};
     currentTrackedOrder = order;
+    const lalamove = order.lalamove || null;
     statusNode.innerHTML = `
       <p><strong>Order Number:</strong> ${order.order_id || "-"}</p>
       <p><strong>Status:</strong> ${order.status || "-"}</p>
       <p><strong>Total:</strong> ${peso(order.total || 0)}</p>
       <p><strong>Payment:</strong> ${order.payment_method || "-"}</p>
       <p><strong>Tracking Number:</strong> ${order.tracking_number || "Pending"}</p>
+      ${
+        lalamove?.status_label
+          ? `<p><strong>Lalamove Status:</strong> ${lalamove.status_label}</p>`
+          : ""
+      }
+      ${
+        lalamove?.tracking_link
+          ? `<p><strong>Lalamove Tracking:</strong> <a href="${lalamove.tracking_link}" target="_blank" rel="noreferrer">Open live tracking</a></p>`
+          : ""
+      }
     `;
     if (actionsNode) {
       const currentStatus = String(order.status || "").trim();

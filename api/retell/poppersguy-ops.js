@@ -2162,6 +2162,139 @@ function buildOrderSummary(order) {
   ].join("\n");
 }
 
+function buildOrderSheetRow(order) {
+  return [
+    order.order_id,
+    order.created_at,
+    order.user_id,
+    order.username,
+    order.full_name,
+    JSON.stringify(order.items || []),
+    parseMoney(order.subtotal),
+    parseMoney(order.discount),
+    parseMoney(order.shipping),
+    parseMoney(order.total),
+    order.delivery_name,
+    order.delivery_address,
+    order.delivery_contact,
+    order.delivery_area,
+    order.payment_method,
+    order.delivery_method || "Standard",
+    order.referral_code || "",
+    order.payment_proof_file_id || "",
+    order.status,
+    order.tracking_number || "",
+    JSON.stringify(order.order_photo_file_ids || []),
+  ];
+}
+
+function mapLalamoveStatusToOrderStatus(lalamoveStatus, currentStatus = "") {
+  const normalized = String(lalamoveStatus || "").trim().toUpperCase();
+  const current = String(currentStatus || "").trim();
+  if (!normalized) {
+    return current;
+  }
+  if (normalized === "COMPLETED") {
+    return current === "Completed" ? "Completed" : "Delivered";
+  }
+  if (["CANCELED", "CANCELLED", "REJECTED", "EXPIRED"].includes(normalized)) {
+    return "Cancelled";
+  }
+  if (["ASSIGNING_DRIVER", "ON_GOING", "PICKED_UP"].includes(normalized)) {
+    if (["Delivered", "Completed", "Cancelled"].includes(current)) {
+      return current;
+    }
+    return "Out for Delivery";
+  }
+  return current || "Confirmed";
+}
+
+function formatLalamoveStatus(status) {
+  const normalized = String(status || "").trim().toUpperCase();
+  return normalized ? normalized.replace(/_/g, " ") : "";
+}
+
+async function syncLalamoveOrderRecord(order, rowNumber, options = {}) {
+  const current = order && typeof order === "object" ? { ...order } : null;
+  if (!current || String(current.delivery_method || "").trim() !== "Lalamove") {
+    return { ok: true, changed: false, order: current, lalamove: null };
+  }
+  const trackingNumber = String(current.tracking_number || "").trim();
+  if (!trackingNumber) {
+    return { ok: true, changed: false, order: current, lalamove: null };
+  }
+
+  const details = await handleLalamoveOrderDetails({
+    lalamove: {
+      market: "PH",
+      orderId: trackingNumber,
+    },
+  });
+  if (!details.ok) {
+    return {
+      ok: false,
+      changed: false,
+      order: current,
+      message: details.message || "Could not load Lalamove order details.",
+      error_code: details.error_code || "LALAMOVE_ORDER_DETAILS_FAILED",
+    };
+  }
+
+  const payload = details.data?.data || details.data || {};
+  const liveStatus = String(payload.status || "").trim().toUpperCase();
+  const liveTrackingLink = extractLalamoveTrackingLink(details.data);
+  const mappedStatus = mapLalamoveStatusToOrderStatus(liveStatus, current.status);
+  const updated = {
+    ...current,
+    status: mappedStatus,
+  };
+  const changed = String(mappedStatus || "").trim() !== String(current.status || "").trim();
+  const lalamove = {
+    status: liveStatus,
+    status_label: formatLalamoveStatus(liveStatus),
+    tracking_link: liveTrackingLink,
+    driver_id: String(payload.driverId || "").trim(),
+    share_link: liveTrackingLink,
+  };
+
+  if (changed && rowNumber) {
+    await updateRecordRow("Orders", rowNumber, buildOrderSheetRow(updated));
+    if (options.notify !== false) {
+      const adminLines = [
+        "Lalamove order update",
+        `Order: ${updated.order_id}`,
+        `Status: ${updated.status}`,
+        lalamove.status_label ? `Lalamove Status: ${lalamove.status_label}` : "",
+        lalamove.tracking_link ? `Lalamove tracking: ${lalamove.tracking_link}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      await notifyAdmins(adminLines).catch(() => null);
+
+      const targetId = String(updated.user_id || "").trim();
+      if (isTelegramChatId(targetId)) {
+        const customerLines = [
+          `Order ${updated.order_id} update`,
+          `Status: ${updated.status}`,
+          lalamove.status_label ? `Rider status: ${lalamove.status_label}` : "",
+          lalamove.tracking_link ? `Live tracking: ${lalamove.tracking_link}` : "",
+          `Track here: https://poppers.jcit.digital/poppers/track?order_id=${encodeURIComponent(String(updated.order_id || "").trim())}`,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        await telegramSendMessage(targetId, customerLines, { parse_mode: null }).catch(() => null);
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    changed,
+    order: updated,
+    lalamove,
+  };
+}
+
 async function handleGetCatalog(body) {
   const catalog = await fetchCatalog();
   const category = String(body.catalog?.category || "").trim().toLowerCase();
@@ -2553,7 +2686,7 @@ async function handleTrackOrder(body, useLatest = false) {
     };
   }
 
-  const order = await findOrderRecord(requestedOrderId, customer, orderSearch);
+  let order = await findOrderRecord(requestedOrderId, customer, orderSearch);
   if (!order) {
     return {
       ok: false,
@@ -2563,6 +2696,24 @@ async function handleTrackOrder(body, useLatest = false) {
         : "Order not found.",
       error_code: "ORDER_NOT_FOUND",
     };
+  }
+
+  let lalamove = null;
+  if (String(order.delivery_method || "").trim() === "Lalamove" && String(order.tracking_number || "").trim()) {
+    const rows = await getRecordRows("Orders").catch(() => [ORDER_HEADERS]);
+    const records = mapSheetRows(rows).map(normalizeLegacyOrderRecord);
+    const index = records.findIndex(
+      (record) => String(record.order_id || "").trim().toUpperCase() === String(order.order_id || "").trim().toUpperCase()
+    );
+    const syncResult = await syncLalamoveOrderRecord(order, index >= 0 ? index + 2 : null, {
+      notify: true,
+    }).catch(() => null);
+    if (syncResult?.order) {
+      order = syncResult.order;
+    }
+    if (syncResult?.lalamove) {
+      lalamove = syncResult.lalamove;
+    }
   }
 
   const status = String(order.status || "").trim() || "Pending";
@@ -2587,6 +2738,7 @@ async function handleTrackOrder(body, useLatest = false) {
       total: parseMoney(order.total),
       created_at: String(order.created_at || "").trim(),
       tracking_available: Boolean(trackingNumber),
+      lalamove,
       order_photo_count: photoFileIds.length,
       order_photos: photoFileIds.map((_, index) => ({
         index,
@@ -3239,6 +3391,7 @@ module.exports.helpers = {
   getCheckoutLalamoveQuote,
   placeCheckoutLalamoveOrder,
   getLalamoveTrackingLink,
+  syncLalamoveOrderRecord,
   parsePhotoFileIds,
   telegramSendPhoto,
   settleCompletedOrderRewards,

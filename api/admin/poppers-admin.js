@@ -19,6 +19,7 @@ const {
   getCheckoutLalamoveQuote,
   placeCheckoutLalamoveOrder,
   getLalamoveTrackingLink,
+  syncLalamoveOrderRecord,
   parsePhotoFileIds,
   telegramSendPhoto,
   settleCompletedOrderRewards,
@@ -546,6 +547,24 @@ async function handleGetDashboard(body) {
   const limit = Math.max(1, Math.min(Number(body.limit || DEFAULT_LIMIT) || DEFAULT_LIMIT, 200));
   const search = String(body.search || "").trim();
   const entries = await readOrdersWithRows();
+  for (const entry of entries) {
+    if (
+      entry.view.delivery_method === "Lalamove" &&
+      String(entry.view.tracking_number || "").trim() &&
+      !FINAL_STATUSES.has(entry.view.status)
+    ) {
+      const syncResult = await syncLalamoveOrderRecord(entry.view, entry.rowNumber, {
+        notify: true,
+      }).catch(() => null);
+      if (syncResult?.order) {
+        entry.view = orderRecordToView({
+          ...entry.record,
+          status: syncResult.order.status,
+          tracking_number: syncResult.order.tracking_number,
+        });
+      }
+    }
+  }
   const filtered = entries.filter((entry) => {
     if (!matchOrder(entry, search)) {
       return false;
