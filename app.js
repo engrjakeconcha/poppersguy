@@ -1460,8 +1460,12 @@ async function loadCatalog() {
     throw new Error(`Failed to load ${state.store.slug} catalog`);
   }
   const payload = await response.json();
-  state.products = payload.products || [];
-  state.categories = payload.categories || [];
+  if (!payload.ok) {
+    throw new Error(payload.message || `Failed to load ${state.store.slug} catalog`);
+  }
+  const data = payload.data || {};
+  state.products = data.products || [];
+  state.categories = data.categories || [];
   updateMeta();
   renderFilters();
   renderProducts();
