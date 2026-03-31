@@ -4,11 +4,13 @@ const { createHmac, createSign, randomUUID } = require("node:crypto");
 const net = require("node:net");
 const tls = require("node:tls");
 
-const DEFAULT_CATALOG_URL = "https://jakeconcha.pythonanywhere.com/api/catalog/poppers";
+const DEFAULT_POPPERS_CATALOG_URL = "https://jakeconcha.pythonanywhere.com/api/catalog/poppers";
+const DEFAULT_DELU_CATALOG_URL = "https://jakeconcha.pythonanywhere.com/api/catalog/delu";
 const DEFAULT_CART_SESSION_API_URL = "";
 const DEFAULT_REDIS_URL = "";
 const LALAMOVE_SANDBOX_BASE = "https://rest.sandbox.lalamove.com";
 const DEFAULT_GSHEET_ID = "1_OQ3tiHzb0jFrkcg2mwDz-prVLDa-ef5GUijqJwcD_I";
+const DEFAULT_DELU_GSHEET_ID = "1sgzv8LTnqkxi5e1_VM1Zb_XxPDk6vhBv4s5pCj9LSxM";
 const ORDER_HEADERS = [
   "order_id",
   "created_at",
@@ -103,7 +105,30 @@ const LOYALTY_POINTS_PER_ORDER = 10;
 const REFERRAL_SUCCESS_POINTS = 50;
 const REWARD_COMPLETION_STATUSES = new Set(["Delivered", "Completed", "Received"]);
 const PROMO_CACHE_TTL_MS = 5 * 60 * 1000;
-const ADMIN_PORTAL_URL = "https://poppers.jcit.digital/admin";
+const STORE_CONFIGS = {
+  poppers: {
+    slug: "poppers",
+    catalogUrlEnv: "POPPERS_CATALOG_URL",
+    defaultCatalogUrl: DEFAULT_POPPERS_CATALOG_URL,
+    publicBaseUrl: process.env.POPPERS_PUBLIC_BASE_URL || "https://poppers.jcit.digital",
+    adminPortalUrl: process.env.POPPERS_ADMIN_PORTAL_URL || "https://poppers.jcit.digital/admin",
+    defaultPromoCode: "LOYAL30",
+    referralPrefixes: ["PGPH"],
+    sheetIdEnv: "POPPERS_GSHEET_ID",
+    defaultSheetId: DEFAULT_GSHEET_ID,
+  },
+  delu: {
+    slug: "delu",
+    catalogUrlEnv: "DELU_CATALOG_URL",
+    defaultCatalogUrl: DEFAULT_DELU_CATALOG_URL,
+    publicBaseUrl: process.env.DELU_PUBLIC_BASE_URL || "https://delu.jcit.digital",
+    adminPortalUrl: process.env.DELU_ADMIN_PORTAL_URL || "https://delu.jcit.digital/admin",
+    defaultPromoCode: "LOYAL20",
+    referralPrefixes: ["DELU", "PGPH"],
+    sheetIdEnv: "DELU_GSHEET_ID",
+    defaultSheetId: DEFAULT_DELU_GSHEET_ID,
+  },
+};
 const DEFAULT_LALAMOVE_SERVICE_TYPE = "MOTORCYCLE";
 const DEFAULT_LALAMOVE_PICKUP_ADDRESS = "Santol St 1372, 1448 Valenzuela, Philippines";
 const DEFAULT_LALAMOVE_PICKUP_LAT = "14.7060176";
@@ -139,7 +164,9 @@ const SHEET_CACHE_TTL_MS = 15 * 1000;
 const sheetRowsCache = new Map();
 const sheetRowsInFlight = new Map();
 const CART_SESSION_TTL_MS = 30 * 60 * 1000;
+const PAYMENT_PROOF_TTL_MS = 60 * 60 * 1000;
 const cartSessions = new Map();
+const paymentProofCache = new Map();
 function sendJson(res, status, body) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body));
@@ -161,6 +188,12 @@ function parseJsonEnv(name, fallback) {
   } catch (_) {
     return fallback;
   }
+}
+
+function normalizeActiveFlag(value) {
+  const normalized = String(value == null ? "" : value).trim().toLowerCase();
+  if (!normalized) return true;
+  return !["0", "false", "no", "inactive", "disabled"].includes(normalized);
 }
 
 function base64UrlEncode(input) {
@@ -315,6 +348,50 @@ async function readCartSessionFromRedis(sessionKey) {
   } catch (_) {
     return [];
   }
+}
+
+async function persistPaymentProofToken(token, dataUrl) {
+  if (!token || !dataUrl) {
+    return false;
+  }
+  if (getRedisUrl()) {
+    const ttlSeconds = Math.floor(PAYMENT_PROOF_TTL_MS / 1000);
+    await withRedisConnection((command) => command(["SETEX", `paymentproof:${token}`, String(ttlSeconds), dataUrl]));
+    return true;
+  }
+  paymentProofCache.set(token, { dataUrl, expiresAt: Date.now() + PAYMENT_PROOF_TTL_MS });
+  return true;
+}
+
+async function readPaymentProofToken(token) {
+  if (!token) {
+    return "";
+  }
+  if (getRedisUrl()) {
+    const payload = await withRedisConnection((command) => command(["GET", `paymentproof:${token}`]));
+    return payload ? String(payload || "") : "";
+  }
+  const cached = paymentProofCache.get(token);
+  if (!cached) {
+    return "";
+  }
+  if (cached.expiresAt < Date.now()) {
+    paymentProofCache.delete(token);
+    return "";
+  }
+  return String(cached.dataUrl || "");
+}
+
+async function deletePaymentProofToken(token) {
+  if (!token) {
+    return false;
+  }
+  if (getRedisUrl()) {
+    await withRedisConnection((command) => command(["DEL", `paymentproof:${token}`]));
+    return true;
+  }
+  paymentProofCache.delete(token);
+  return true;
 }
 
 async function getGoogleAccessToken() {
@@ -611,7 +688,7 @@ function mapSheetRows(rows) {
     });
 }
 
-const KNOWN_DELIVERY_METHODS = new Set(["Standard", "Lalamove"]);
+const KNOWN_DELIVERY_METHODS = new Set(["Standard", "Lalamove", "Lalamove Self-Paid"]);
 const KNOWN_ORDER_STATUSES = new Set([
   "Pending",
   "Pending Confirmation",
@@ -1500,8 +1577,9 @@ async function readPersistedCartSession(body, keys = getCartSessionKeys(body)) {
   return [];
 }
 
-async function fetchCatalog() {
-  const url = process.env.POPPERS_CATALOG_URL || DEFAULT_CATALOG_URL;
+async function fetchCatalog(body = {}) {
+  const storeConfig = getStoreConfig(body);
+  const url = process.env[storeConfig.catalogUrlEnv] || storeConfig.defaultCatalogUrl;
   try {
     const response = await fetch(url, {
       headers: { Accept: "application/json" },
@@ -1516,10 +1594,23 @@ async function fetchCatalog() {
       return { products, categories };
     }
   } catch (_) {
-    // Fall back to the live Products sheet so checkout keeps working if the external catalog is down.
+    // Fall back to the store-specific Products sheet so checkout keeps working if the external catalog is down.
   }
 
-  const rows = await getRecordRows("Products");
+  const spreadsheetId = getStoreSpreadsheetId(storeConfig);
+  const accessToken = await getGoogleAccessToken();
+  const range = encodeURIComponent("Products!A:Z");
+  const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+    },
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.error?.message || `Failed to load ${storeConfig.slug} products sheet`);
+  }
+  const rows = Array.isArray(payload.values) ? payload.values : [];
   const records = mapSheetRows(rows);
   const products = records
     .map((record) => ({
@@ -1644,18 +1735,42 @@ function getRewardIdentityKeys(customer = {}) {
   ].filter(Boolean);
 }
 
-function makeReferralCodesForIdentity(userId = "", username = "") {
+function getStoreConfig(body = {}) {
+  const requested = String(body?.store || body?.customer?.store || "").trim().toLowerCase();
+  return STORE_CONFIGS[requested] || STORE_CONFIGS.poppers;
+}
+
+function buildStoreTrackingUrl(storeConfig, orderId = "") {
+  const base = String(storeConfig?.publicBaseUrl || STORE_CONFIGS.poppers.publicBaseUrl).replace(/\/+$/, "");
+  return `${base}/${storeConfig.slug}/track?order_id=${encodeURIComponent(String(orderId || "").trim())}`;
+}
+
+function getStoreSpreadsheetId(storeConfig = STORE_CONFIGS.poppers) {
+  const envName = String(storeConfig?.sheetIdEnv || "GSHEET_ID").trim();
+  const fallback = String(storeConfig?.defaultSheetId || DEFAULT_GSHEET_ID).trim();
+  return String(process.env[envName] || process.env.GSHEET_ID || fallback).trim();
+}
+
+function makeReferralCodesForIdentity(userId = "", username = "", storeConfig = STORE_CONFIGS.poppers) {
   const codes = new Set();
   const normalizedUsername = String(username || "").trim().replace(/^@/, "");
   const normalizedUserId = String(userId || "").trim().replace(/^@/, "");
+  const prefixes =
+    Array.isArray(storeConfig?.referralPrefixes) && storeConfig.referralPrefixes.length
+      ? storeConfig.referralPrefixes
+      : ["PGPH"];
   if (normalizedUsername) {
     const sanitized = normalizedUsername.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 10);
     if (sanitized) {
-      codes.add(`PGPH-${sanitized}`);
+      for (const prefix of prefixes) {
+        codes.add(`${prefix}-${sanitized}`);
+      }
     }
   }
   if (normalizedUserId) {
-    codes.add(`PGPH-${normalizedUserId.replace(/\D/g, "").slice(-6)}`);
+    for (const prefix of prefixes) {
+      codes.add(`${prefix}-${normalizedUserId.replace(/\D/g, "").slice(-6)}`);
+    }
   }
   return Array.from(codes).filter(Boolean);
 }
@@ -1720,7 +1835,7 @@ async function findReferrerByReferralCode(referralCode) {
   const rows = await getRecordRows("Users").catch(() => [USER_HEADERS]);
   const users = mapSheetRows(rows);
   for (const user of users) {
-    const codes = makeReferralCodesForIdentity(user.user_id, user.username);
+    const codes = makeReferralCodesForIdentity(user.user_id, user.username, STORE_CONFIGS.delu);
     if (codes.includes(normalizedCode)) {
       return {
         telegram_user_id: String(user.user_id || "").trim(),
@@ -1830,7 +1945,10 @@ function computeTotals(subtotal, discount, deliveryArea, paymentMethod) {
 
 function getCheckoutDeliveryMethod(checkout) {
   const method = String(checkout?.delivery_method || "").trim().toLowerCase();
-  if (method === "lalamove" || method === "same-day lalamove") {
+  if (method === "lalamove self-paid" || method === "i will pay lalamove") {
+    return "Lalamove Self-Paid";
+  }
+  if (method === "lalamove" || method === "same-day lalamove" || method === "pay lalamove with bill") {
     return "Lalamove";
   }
   return "Standard";
@@ -2219,8 +2337,8 @@ async function telegramSendPhoto(chatId, photoSource, caption = "") {
   return payload;
 }
 
-async function notifyAdmins(text) {
-  const textWithLink = [String(text || "").trim(), "", `Admin Portal: ${ADMIN_PORTAL_URL}`]
+async function notifyAdmins(text, storeConfig = STORE_CONFIGS.poppers) {
+  const textWithLink = [String(text || "").trim(), "", `Admin Portal: ${storeConfig.adminPortalUrl}`]
     .filter(Boolean)
     .join("\n");
   const adminGroup = process.env.TELEGRAM_ADMIN_GROUP_ID;
@@ -2320,6 +2438,7 @@ function formatLalamoveStatus(status) {
 }
 
 async function syncLalamoveOrderRecord(order, rowNumber, options = {}) {
+  const storeConfig = options.storeConfig || STORE_CONFIGS.poppers;
   const current = order && typeof order === "object" ? { ...order } : null;
   if (!current || String(current.delivery_method || "").trim() !== "Lalamove") {
     return { ok: true, changed: false, order: current, lalamove: null };
@@ -2427,7 +2546,7 @@ async function syncLalamoveOrderRecord(order, rowNumber, options = {}) {
       ]
         .filter(Boolean)
         .join("\n");
-      await notifyAdmins(adminLines).catch(() => null);
+      await notifyAdmins(adminLines, storeConfig).catch(() => null);
 
       const targetId = String(updated.user_id || "").trim();
       if (isTelegramChatId(targetId)) {
@@ -2439,7 +2558,7 @@ async function syncLalamoveOrderRecord(order, rowNumber, options = {}) {
           lalamove.driver?.phone ? `Rider phone: ${lalamove.driver.phone}` : "",
           lalamove.driver?.plate_number ? `Plate number: ${lalamove.driver.plate_number}` : "",
           lalamove.tracking_link ? `Live tracking: ${lalamove.tracking_link}` : "",
-          `Track here: https://poppers.jcit.digital/poppers/track?order_id=${encodeURIComponent(String(updated.order_id || "").trim())}`,
+          `Track here: ${buildStoreTrackingUrl(storeConfig, updated.order_id)}`,
         ]
           .filter(Boolean)
           .join("\n");
@@ -2457,7 +2576,7 @@ async function syncLalamoveOrderRecord(order, rowNumber, options = {}) {
 }
 
 async function handleGetCatalog(body) {
-  const catalog = await fetchCatalog();
+  const catalog = await fetchCatalog(body);
   const category = String(body.catalog?.category || "").trim().toLowerCase();
   const query = String(body.catalog?.query || "").trim().toLowerCase();
 
@@ -2487,7 +2606,7 @@ async function handleGetCatalog(body) {
 }
 
 async function handleGetProduct(body) {
-  const { products } = await fetchCatalog();
+  const { products } = await fetchCatalog(body);
   const sku = body.catalog?.sku;
   const product = findProduct(products, sku);
   if (!product) {
@@ -2507,7 +2626,7 @@ async function handleGetProduct(body) {
 }
 
 async function handleCart(body) {
-  const { products } = await fetchCatalog();
+  const { products } = await fetchCatalog(body);
   const items = await resolveCartItems(body);
   const cart = buildCartLines(products, items);
   return {
@@ -2519,7 +2638,8 @@ async function handleCart(body) {
 }
 
 async function handleQuoteOrder(body) {
-  const { products } = await fetchCatalog();
+  const storeConfig = getStoreConfig(body);
+  const { products } = await fetchCatalog(body);
   const items = await resolveCartItems(body);
   if (!items.length) {
     return {
@@ -2546,7 +2666,7 @@ async function handleQuoteOrder(body) {
   if (!promoCode || promoCode.toLowerCase() === "none") {
     const repeatBuyer = await hasRepeatBuyerHistory(body.customer || {}, checkout);
     if (repeatBuyer) {
-      promoCode = "LOYAL30";
+      promoCode = storeConfig.defaultPromoCode;
       promoSource = "auto_repeat_buyer";
     }
   }
@@ -2571,7 +2691,8 @@ async function handleQuoteOrder(body) {
   if (rewardsBlockedByPromo) {
     warnings.push("Promos and rewards cannot be combined in the same order.");
   }
-  const lalamove = await getCheckoutLalamoveQuote(checkout, cart);
+  const shouldBillLalamove = getCheckoutDeliveryMethod(checkout) === "Lalamove";
+  const lalamove = shouldBillLalamove ? await getCheckoutLalamoveQuote(checkout, cart) : null;
   if (lalamove?.ok) {
     totals.delivery_fee = parseMoney(lalamove.quoted_total);
     totals.shipping = parseMoney(totals.shipping + totals.delivery_fee);
@@ -2667,6 +2788,7 @@ async function handleValidateDeliveryAddress(body) {
 }
 
 async function handleSubmitOrder(body) {
+  const storeConfig = getStoreConfig(body);
   const quote = await handleQuoteOrder(body);
   if (!quote.ok) {
     return quote;
@@ -2775,13 +2897,25 @@ async function handleSubmitOrder(body) {
   }
 
   try {
-    await notifyAdmins(adminText);
+    await notifyAdmins(adminText, storeConfig);
     notifications.admin_notified = true;
   } catch (error) {
     notifications.admin_error = error instanceof Error ? error.message : "Failed to notify admins.";
   }
 
-  if (checkout.payment_proof_url) {
+  let resolvedPaymentProofUrl = String(checkout.payment_proof_url || "").trim();
+  if (!resolvedPaymentProofUrl && checkout.payment_proof_token) {
+    try {
+      resolvedPaymentProofUrl = await readPaymentProofToken(String(checkout.payment_proof_token || "").trim());
+      if (!resolvedPaymentProofUrl) {
+        notifications.payment_proof_error = "Uploaded payment proof could not be found. Please upload it again.";
+      }
+    } catch (error) {
+      notifications.payment_proof_error = error instanceof Error ? error.message : "Failed to load uploaded payment proof.";
+    }
+  }
+
+  if (resolvedPaymentProofUrl) {
     try {
       const adminGroup = process.env.TELEGRAM_ADMIN_GROUP_ID;
       const adminIds = String(process.env.TELEGRAM_ADMIN_IDS || "")
@@ -2792,8 +2926,8 @@ async function handleSubmitOrder(body) {
       for (const target of targets) {
         const photoResult = await telegramSendPhoto(
           target,
-          checkout.payment_proof_url,
-          `Payment proof for *${order.order_id}*\nAdmin Portal: ${ADMIN_PORTAL_URL}`
+          resolvedPaymentProofUrl,
+          `Payment proof for *${order.order_id}*\nAdmin Portal: ${storeConfig.adminPortalUrl}`
         );
         const firstPhoto = photoResult?.result?.photo?.slice(-1)?.[0];
         if (firstPhoto?.file_id) {
@@ -2801,6 +2935,9 @@ async function handleSubmitOrder(body) {
         }
       }
       notifications.payment_proof_forwarded = true;
+      if (checkout.payment_proof_token) {
+        await deletePaymentProofToken(String(checkout.payment_proof_token || "").trim()).catch(() => null);
+      }
     } catch (error) {
       notifications.payment_proof_error =
         error instanceof Error ? error.message : "Failed to forward payment proof.";
@@ -2833,6 +2970,7 @@ async function handleSubmitOrder(body) {
 }
 
 async function handleTrackOrder(body, useLatest = false) {
+  const storeConfig = getStoreConfig(body);
   const customer = body.customer || {};
   const orderSearch = body.order || {};
   const requestedOrderId = useLatest ? "" : String(orderSearch.order_id || body.order_id || "").trim();
@@ -2868,6 +3006,7 @@ async function handleTrackOrder(body, useLatest = false) {
     );
     const syncResult = await syncLalamoveOrderRecord(order, index >= 0 ? index + 2 : null, {
       notify: true,
+      storeConfig,
     }).catch(() => null);
     if (syncResult?.order) {
       order = syncResult.order;
@@ -2903,7 +3042,7 @@ async function handleTrackOrder(body, useLatest = false) {
       order_photo_count: photoFileIds.length,
       order_photos: photoFileIds.map((_, index) => ({
         index,
-        url: `https://poppers.jcit.digital/api/storefront/order-photo?order_id=${encodeURIComponent(
+        url: `${String(storeConfig.publicBaseUrl || "").replace(/\/+$/, "")}/api/storefront/order-photo?order_id=${encodeURIComponent(
           String(order.order_id || "").trim()
         )}&index=${index}`,
       })),
@@ -2912,6 +3051,7 @@ async function handleTrackOrder(body, useLatest = false) {
 }
 
 async function handleCompleteOrder(body) {
+  const storeConfig = getStoreConfig(body);
   const customer = body.customer || {};
   const requestedOrderId = String(body.order_id || body.order?.order_id || "").trim();
   const requestedStatus = String(body.status || "").trim();
@@ -2995,7 +3135,8 @@ async function handleCompleteOrder(body) {
       rewardsSummary ? `Rewards balance: ${rewardsSummary.balance_after} points` : "",
     ]
       .filter(Boolean)
-      .join("\n")
+      .join("\n"),
+    storeConfig
   );
 
   return {
@@ -3006,7 +3147,7 @@ async function handleCompleteOrder(body) {
       order_id: String(updated.order_id || "").trim(),
       status: normalizedStatus,
       rewards: rewardsSummary,
-      tracking_link: `https://poppers.jcit.digital/poppers/track?order_id=${encodeURIComponent(String(updated.order_id || "").trim())}`,
+      tracking_link: buildStoreTrackingUrl(storeConfig, updated.order_id),
     },
   };
 }
@@ -3636,4 +3777,9 @@ module.exports.helpers = {
   REFERRAL_SUCCESS_POINTS,
   LOYALTY_REDEEM_POINTS,
   LOYALTY_REDEEM_VALUE,
+  getStoreConfig,
+  notifyAdmins,
+  persistPaymentProofToken,
+  readPaymentProofToken,
+  deletePaymentProofToken,
 };
