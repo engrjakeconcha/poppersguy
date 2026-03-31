@@ -16,7 +16,15 @@
       "has": [{ "type": "host", "value": "project-jaz0l-jakeconcha-7757s-projects.vercel.app" }],
       "destination": "/poppers/index.html"
     },
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "delu.jcit.digital" }],
+      "destination": "/delu/index.html"
+    },
     { "source": "/delu", "destination": "/delu/index.html" },
+    { "source": "/delu/address", "destination": "/delu/address/index.html" },
+    { "source": "/delu/checkout", "destination": "/delu/checkout/index.html" },
+    { "source": "/delu/track", "destination": "/delu/track/index.html" },
     { "source": "/admin", "destination": "/admin/index.html" },
     { "source": "/poppers", "destination": "/poppers/index.html" },
     { "source": "/sales-app-2", "destination": "/sales-app-2/index.html" },

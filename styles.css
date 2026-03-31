@@ -17,6 +17,64 @@
   --font-body: "DM Sans", "Helvetica Neue", sans-serif;
 }
 
+html[data-store="delu"] body {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.78)),
+    radial-gradient(circle at top left, rgba(41, 182, 255, 0.2), transparent 34%),
+    radial-gradient(circle at top right, rgba(255, 114, 198, 0.18), transparent 30%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.86), rgba(250, 241, 247, 0.94)),
+    linear-gradient(180deg, #fffafe 0%, #eef8ff 100%);
+}
+
+html[data-store="delu"] .hero,
+html[data-store="delu"] .checkout-shell__summary,
+html[data-store="delu"] .checkout-form,
+html[data-store="delu"] .product-card,
+html[data-store="delu"] .admin-panel,
+html[data-store="delu"] .admin-card {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(247, 250, 255, 0.96)),
+    linear-gradient(140deg, rgba(41, 182, 255, 0.12), rgba(255, 114, 198, 0.08));
+}
+
+html[data-store="delu"] .hero {
+  border-color: rgba(41, 182, 255, 0.14);
+}
+
+html[data-store="delu"] .product-card__media {
+  background:
+    linear-gradient(140deg, rgba(41, 182, 255, 0.12), rgba(255, 114, 198, 0.16)),
+    repeating-linear-gradient(
+      135deg,
+      rgba(41, 182, 255, 0.06) 0,
+      rgba(41, 182, 255, 0.06) 1px,
+      transparent 1px,
+      transparent 18px
+    );
+}
+
+html[data-store="delu"] .cta--primary,
+html[data-store="delu"] .product-card__button,
+html[data-store="delu"] .cart-button__count {
+  color: #ffffff;
+  box-shadow: 0 14px 28px rgba(255, 114, 198, 0.22);
+}
+
+html[data-store="delu"] .pill,
+html[data-store="delu"] .filter-button.is-active,
+html[data-store="delu"] .checkout-badge--repeat {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 20%, #ffffff),
+    color-mix(in srgb, var(--accent-2) 24%, #ffffff)
+  );
+}
+
+html[data-store="delu"] .hero__logo {
+  background: linear-gradient(180deg, #ffffff, #fcecff);
+  border-color: rgba(255, 114, 198, 0.18);
+}
+
 * {
   box-sizing: border-box;
 }

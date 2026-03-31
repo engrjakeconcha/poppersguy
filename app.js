@@ -6,12 +6,14 @@ const STORES = {
     description:
       "Smooth lubricants, flavors, and adult essentials in a browse-first storefront with bot checkout handoff.",
     botUrl: "https://t.me/delulubesbot",
-    accent: "#4ee1ff",
-    accentSecondary: "#9ef3ff",
-    accentGlow: "rgba(78, 225, 255, 0.24)",
-    accentGold: "#ffe4a3",
+    accent: "#29b6ff",
+    accentSecondary: "#ff72c6",
+    accentGlow: "rgba(41, 182, 255, 0.26)",
+    accentGold: "#ff4ea8",
+    logoUrl:
+      "https://github.com/jcitservices-ai/delulubes/blob/main/product%20images/delulogo.webp?raw=true",
     fallbackImage:
-      "https://raw.githubusercontent.com/jcitservices-ai/delulubes/main/assets/welcome.png",
+      "https://github.com/jcitservices-ai/delulubes/blob/main/product%20images/delulogo.webp?raw=true",
   },
   poppers: {
     slug: "poppers",
@@ -23,6 +25,8 @@ const STORES = {
     accentSecondary: "#ffe18a",
     accentGlow: "rgba(244, 197, 66, 0.24)",
     accentGold: "#d6a300",
+    logoUrl:
+      "https://github.com/jcitservices-ai/poppersguyph/blob/images/logo.jpg?raw=true",
     fallbackImage:
       "https://raw.githubusercontent.com/jcitservices-ai/delulubes/main/poppersguyph/assets/pgphlogo.png",
   },
@@ -49,6 +53,10 @@ const state = {
 
 function referralStorageKey() {
   return `${state.store.slug}_referral_code`;
+}
+
+function referralPrefix() {
+  return state.store?.slug === "delu" ? "DELU" : "PGPH";
 }
 
 function getTelegramMiniAppUser() {
@@ -83,12 +91,12 @@ function getTrackingLink(orderId) {
 function getOwnReferralCode() {
   const telegramUser = getTelegramMiniAppUser();
   if (telegramUser?.username) {
-    return `PGPH-${telegramUser.username.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 10)}`;
+    return `${referralPrefix()}-${telegramUser.username.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 10)}`;
   }
   if (telegramUser?.id) {
-    return `PGPH-${String(telegramUser.id).slice(-6)}`;
+    return `${referralPrefix()}-${String(telegramUser.id).slice(-6)}`;
   }
-  return `PGPH-${state.cart.cart_session_id.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(-6)}`;
+  return `${referralPrefix()}-${state.cart.cart_session_id.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(-6)}`;
 }
 
 function readStoredReferralCode() {
@@ -181,6 +189,10 @@ function currentPage() {
   return document.body?.dataset.page || "catalog";
 }
 
+function defaultRepeatBuyerPromo() {
+  return state.store?.slug === "delu" ? "LOYAL20" : "LOYAL30";
+}
+
 function addressDraftStorageKey() {
   return `${state.store.slug}_delivery_address_draft`;
 }
@@ -254,7 +266,11 @@ function readStoredCart() {
 }
 
 function writeStoredCart(cart) {
-  window.localStorage.setItem(cartStorageKey(), JSON.stringify(cart));
+  try {
+    window.localStorage.setItem(cartStorageKey(), JSON.stringify(cart));
+  } catch (_) {
+    // Ignore storage failures.
+  }
 }
 
 function upsertCartItem(product) {
@@ -383,6 +399,7 @@ function applyStoreTheme(store) {
   const title = document.getElementById("store-title");
   const badge = document.getElementById("store-badge");
   const description = document.getElementById("store-description");
+  const logo = document.querySelector(".hero__logo");
   if (title) {
     title.textContent =
       page === "checkout"
@@ -412,6 +429,10 @@ function applyStoreTheme(store) {
           : "";
     description.textContent = descriptionText;
     description.hidden = !descriptionText;
+  }
+  if (logo && store.logoUrl) {
+    logo.src = store.logoUrl;
+    logo.alt = `${store.title} logo`;
   }
 }
 
@@ -568,7 +589,7 @@ function renderCheckout() {
   const quote = state.lastQuote;
   const repeatBuyerBadge =
     quote?.promo_auto_applied && quote?.promo_code
-      ? `<div class="checkout-badge checkout-badge--repeat">Repeat buyer discount applied: ${String(quote.promo_code || "LOYAL30").toUpperCase()}</div>`
+      ? `<div class="checkout-badge checkout-badge--repeat">Repeat buyer discount applied: ${String(quote.promo_code || defaultRepeatBuyerPromo()).toUpperCase()}</div>`
       : "";
   totals.hidden = false;
   totals.innerHTML = `
@@ -584,10 +605,10 @@ function renderCheckout() {
 }
 
 async function storefrontCheckoutRequest(payload) {
-  const response = await fetch("/api/storefront/poppers-checkout", {
+  const response = await fetch(`/api/storefront/${state.store.slug}-checkout`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, store: state.store.slug }),
   });
   const data = await response.json();
   if (!response.ok || !data.ok) {
@@ -598,6 +619,69 @@ async function storefrontCheckoutRequest(payload) {
   }
   return data;
 }
+
+
+function checkoutErrorAlertStorageKey() {
+  return `${state.store.slug}_checkout_error_alerts`;
+}
+
+function getCheckoutErrorSignature(context = {}) {
+  return JSON.stringify({
+    action: String(context.action || "checkout_error").trim(),
+    message: String(context.message || "").trim(),
+    payment_method: String(context.checkout?.payment_method || "").trim(),
+    delivery_method: String(context.checkout?.delivery_method || "").trim(),
+  });
+}
+
+async function notifyCheckoutError(context = {}) {
+  const payload = {
+    action: String(context.action || "checkout_error").trim() || "checkout_error",
+    message: String(context.message || "Unknown checkout error.").trim(),
+    page: currentPage(),
+    path: window.location.pathname,
+    host: window.location.hostname,
+    order_id: String(context.order_id || "").trim(),
+    customer: context.customer || {},
+    checkout: context.checkout || {},
+    cart: {
+      items_count: Array.isArray(state.cart?.items)
+        ? state.cart.items.reduce((sum, item) => sum + Number(item?.qty || 0), 0)
+        : 0,
+    },
+    store: state.store?.slug || "poppers",
+  };
+
+  const signature = getCheckoutErrorSignature(payload);
+  try {
+    const raw = window.sessionStorage.getItem(checkoutErrorAlertStorageKey());
+    const cache = raw ? JSON.parse(raw) : {};
+    const lastSentAt = Number(cache[signature] || 0);
+    if (Number.isFinite(lastSentAt) && Date.now() - lastSentAt < 60000) {
+      return true;
+    }
+    const response = await fetch("/api/storefront/checkout-error", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      return false;
+    }
+    cache[signature] = Date.now();
+    window.sessionStorage.setItem(checkoutErrorAlertStorageKey(), JSON.stringify(cache));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function withAdminsNotified(message, notified) {
+  const base = String(message || "Unexpected checkout error.").trim();
+  return notified ? `${base} Admins notified.` : base;
+}
+
 
 function collectCheckoutForm() {
   const form = document.getElementById("checkout-form");
@@ -795,8 +879,40 @@ function buildMapEmbedUrl(lat, lng) {
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
     reader.onerror = () => reject(new Error("Failed to read payment screenshot."));
+    reader.onload = () => {
+      const originalDataUrl = String(reader.result || "");
+      const isImage = String(file?.type || "").startsWith("image/");
+      if (!isImage) {
+        resolve(originalDataUrl);
+        return;
+      }
+
+      const image = new Image();
+      image.onerror = () => resolve(originalDataUrl);
+      image.onload = () => {
+        const maxDimension = 1600;
+        const scale = Math.min(1, maxDimension / image.width, maxDimension / image.height);
+        const width = Math.max(1, Math.round(image.width * scale));
+        const height = Math.max(1, Math.round(image.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          resolve(originalDataUrl);
+          return;
+        }
+        context.drawImage(image, 0, 0, width, height);
+        const compressedDataUrl = canvas.toDataURL("image/jpeg", 0.82);
+        if (compressedDataUrl.length > 2_500_000) {
+          reject(new Error("Payment screenshot is too large. Please use a smaller image."));
+          return;
+        }
+        resolve(compressedDataUrl);
+      };
+      image.src = originalDataUrl;
+    };
     reader.readAsDataURL(file);
   });
 }
@@ -887,7 +1003,7 @@ async function refreshQuote() {
     if (result.data?.promo_auto_applied) {
       const promoField = document.querySelector('#checkout-form [name="promo_code"]');
       if (promoField && !String(promoField.value || "").trim()) {
-        promoField.value = result.data.promo_code || "LOYAL30";
+        promoField.value = result.data.promo_code || defaultRepeatBuyerPromo();
       }
     }
     renderCheckout();
@@ -896,7 +1012,18 @@ async function refreshQuote() {
       : `Quote updated. Total is ${peso(result.data.total)}.`;
     setFeedback(quoteMessage, "success");
   } catch (error) {
-    setFeedback(error.message || "Could not refresh the quote.", "error");
+    const message = error.message || "Could not refresh the quote.";
+    const notified = await notifyCheckoutError({
+      action: "quote_order",
+      message,
+      customer: {
+        telegram_id: checkout.telegram_id || "",
+        telegram_user_id: checkout.telegram_user_id || "",
+        username: checkout.telegram_username || "",
+      },
+      checkout,
+    });
+    setFeedback(withAdminsNotified(message, notified), "error");
   }
 }
 
@@ -917,7 +1044,7 @@ async function validateDeliveryAddress() {
         delivery_method: checkout.delivery_method,
       },
     });
-    const mode = checkout.delivery_method === "Lalamove" ? "same-day delivery" : "delivery";
+    const mode = checkout.delivery_method === "Lalamove" ? "same-day delivery" : checkout.delivery_method === "Lalamove Self-Paid" ? "customer-paid same-day delivery" : "delivery";
     setAddressFeedback(`Address verified for ${mode}.`, "success");
     const hasQuoteFields =
       checkout.delivery_name &&
@@ -927,10 +1054,11 @@ async function validateDeliveryAddress() {
     if (currentPage() === "checkout" && state.cart.items.length && hasQuoteFields) {
       await refreshQuote();
     }
-    return result;
+    return { ok: true, verified: true, result };
   } catch (error) {
-    setAddressFeedback(error.message || "Could not verify this address.", "error");
-    throw error;
+    const message = error.message || "Could not verify this address.";
+    setAddressFeedback(`${message} You can still continue and we will review the address manually.`, "error");
+    return { ok: false, verified: false, message };
   }
 }
 
@@ -1027,10 +1155,10 @@ async function loadAddressPage() {
     event.preventDefault();
     try {
       await verify();
-      window.location.href = `/${state.store.slug}/checkout`;
     } catch (error) {
-      setAddressPageFeedback(error.message || "Could not verify this address.", "error");
+      setAddressPageFeedback(`${error.message || "Could not verify this address."} You can still continue and we will review the address manually.`, "error");
     }
+    window.location.href = `/${state.store.slug}/checkout`;
   });
 
   backButton?.addEventListener("click", () => {
@@ -1050,11 +1178,9 @@ async function submitStorefrontOrder(event) {
     return;
   }
   const checkout = collectCheckoutForm();
-  try {
-    await validateDeliveryAddress();
-  } catch (error) {
-    setFeedback(error.message || "Please fix the delivery address first.", "error");
-    return;
+  const addressValidation = await validateDeliveryAddress();
+  if (addressValidation && addressValidation.verified === false) {
+    setFeedback(`${addressValidation.message || "Could not verify this address."} We saved your order and will review the address manually.`, "warning");
   }
   let paymentProofUrl = "";
   if (paymentMethodNeedsProof(checkout.payment_method)) {
@@ -1103,7 +1229,18 @@ async function submitStorefrontOrder(event) {
     renderCheckout();
     document.getElementById("checkout-form").reset();
   } catch (error) {
-    setFeedback(error.message || "Could not place the order.", "error");
+    const message = error.message || "Could not place the order.";
+    const notified = await notifyCheckoutError({
+      action: "submit_order",
+      message,
+      customer: {
+        telegram_id: checkout.telegram_id || "",
+        telegram_user_id: checkout.telegram_user_id || "",
+        username: checkout.telegram_username || "",
+      },
+      checkout,
+    });
+    setFeedback(withAdminsNotified(message, notified), "error");
   }
 }
 
@@ -1460,8 +1597,12 @@ async function loadCatalog() {
     throw new Error(`Failed to load ${state.store.slug} catalog`);
   }
   const payload = await response.json();
-  state.products = payload.products || [];
-  state.categories = payload.categories || [];
+  if (!payload.ok) {
+    throw new Error(payload.message || `Failed to load ${state.store.slug} catalog`);
+  }
+  const data = payload.data || {};
+  state.products = data.products || [];
+  state.categories = data.categories || [];
   updateMeta();
   renderFilters();
   renderProducts();
@@ -1649,8 +1790,7 @@ async function main() {
     console.error(error);
     const productGrid = document.getElementById("product-grid");
     if (productGrid) {
-      productGrid.innerHTML =
-        '<div class="empty-state">Catalog failed to load. Please try again in a moment.</div>';
+      productGrid.innerHTML = `<div class="empty-state">Catalog failed to load. ${String(error?.message || 'Please try again in a moment.')}</div>`;
     }
   }
 }

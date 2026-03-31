@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>deluLubes Track Order</title>
+    <meta name="description" content="Track your deluLubes order status." />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body data-page="track">
+    <div class="page-shell">
+      <header class="hero hero--checkout">
+        <div class="hero__glow"></div>
+        <div class="hero__copy">
+          <p class="eyebrow" id="store-badge">Order Tracking</p>
+          <h1 id="store-title">Track your order</h1>
+          <p id="store-description" class="hero__description">
+            Check your latest order status or open a specific order from its tracking link.
+          </p>
+          <div class="hero__actions">
+            <button id="back-to-catalog" class="cta cta--secondary" type="button">Back to Catalog</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="catalog">
+        <section class="checkout-shell checkout-shell--catalog">
+          <div class="checkout-shell__summary">
+            <div class="checkout-shell__head">
+              <p class="eyebrow">Tracking</p>
+              <h2>Order Status</h2>
+            </div>
+            <form id="tracking-form" class="checkout-form tracking-form">
+              <div class="form-grid">
+                <label class="field">
+                  <span>Order Number</span>
+                  <input name="order_id" type="text" placeholder="DL..." />
+                </label>
+                <label class="field">
+                  <span>Telegram Username</span>
+                  <input name="telegram_username" type="text" placeholder="@username" />
+                </label>
+              </div>
+              <label class="field">
+                <span>Phone Number</span>
+                <input name="phone" type="text" inputmode="tel" placeholder="09..." />
+              </label>
+              <button class="cta cta--primary" type="submit">Track Order</button>
+            </form>
+            <div id="tracking-status" class="tracking-card">
+              Loading your order status...
+            </div>
+            <div id="tracking-rider" class="tracking-card" hidden>
+              <div id="tracking-rider-meta"></div>
+              <div id="tracking-map" class="tracking-map" hidden></div>
+            </div>
+            <div id="tracking-actions" class="checkout-actions" hidden>
+              <button id="mark-delivered" class="cta cta--secondary" type="button">Mark Delivered</button>
+              <button id="mark-completed" class="cta cta--primary" type="button">Mark Completed</button>
+            </div>
+            <div id="survey-wrap" class="checkout-form tracking-form" hidden>
+              <div class="checkout-shell__head">
+                <p class="eyebrow">Service Survey</p>
+                <h2>Rate your order</h2>
+              </div>
+              <div class="field">
+                <span>Your Rating</span>
+                <div id="survey-stars" class="survey-stars" role="radiogroup" aria-label="Order rating">
+                  <button type="button" class="survey-star" data-rating="1" aria-label="1 star">★</button>
+                  <button type="button" class="survey-star" data-rating="2" aria-label="2 stars">★</button>
+                  <button type="button" class="survey-star" data-rating="3" aria-label="3 stars">★</button>
+                  <button type="button" class="survey-star" data-rating="4" aria-label="4 stars">★</button>
+                  <button type="button" class="survey-star" data-rating="5" aria-label="5 stars">★</button>
+                </div>
+              </div>
+              <label class="field">
+                <span>Comment</span>
+                <textarea id="survey-comment" rows="3" placeholder="Optional feedback"></textarea>
+              </label>
+              <div class="checkout-actions">
+                <button id="submit-survey" class="cta cta--primary" type="button">Submit Survey</button>
+              </div>
+              <div id="survey-feedback" class="checkout-feedback" aria-live="polite"></div>
+            </div>
+            <div id="tracking-gallery" class="tracking-gallery" hidden></div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-credit">
+        <p>
+          JCIT Ordering App version 2.0. Ordering bot made by JCIT Services. If you would like the same service contact
+          <a href="https://t.me/siJayco" target="_blank" rel="noreferrer">t.me/siJayco</a>
+          or check
+          <a href="https://jcit.digital" target="_blank" rel="noreferrer">jcit.digital</a>.
+        </p>
+      </footer>
+    </div>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

@@ -18,8 +18,12 @@
           "project-jaz0l.vercel.app",
           "project-jaz0l-jakeconcha-7757s-projects.vercel.app",
         ]);
+        const deluHosts = new Set(["delu.jcit.digital"]);
         if (poppersHosts.has(host) && window.location.pathname === "/") {
           window.location.replace(`/poppers${window.location.search}${window.location.hash}`);
+        }
+        if (deluHosts.has(host) && window.location.pathname === "/") {
+          window.location.replace(`/delu${window.location.search}${window.location.hash}`);
         }
       })();
     </script>

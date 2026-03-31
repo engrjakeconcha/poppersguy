@@ -73,7 +73,7 @@ const KNOWN_STATUSES = new Set([
   "Cancelled",
   "Completed",
 ]);
-const KNOWN_DELIVERY_METHODS = new Set(["Standard", "Lalamove"]);
+const KNOWN_DELIVERY_METHODS = new Set(["Standard", "Lalamove", "Lalamove Self-Paid"]);
 
 function sendJson(res, status, body) {
   res.status(status).setHeader("Content-Type", "application/json; charset=utf-8");

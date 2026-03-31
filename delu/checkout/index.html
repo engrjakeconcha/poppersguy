@@ -3,17 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>PoppersGuyPH Checkout</title>
+    <title>deluLubes Checkout</title>
     <meta
       name="description"
-      content="Complete your PoppersGuyPH order with delivery, payment, promo code, and payment proof upload."
+      content="Complete your deluLubes order with delivery, payment, promo code, and payment proof upload."
     />
     <link rel="stylesheet" href="/styles.css" />
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script>
       (function () {
-        const CART_STORAGE_KEY = "poppers_catalog_cart";
-        const payload = { store: "poppers" };
+        const CART_STORAGE_KEY = "delu_catalog_cart";
+        const payload = { store: "delu" };
 
         try {
           const raw = window.localStorage.getItem(CART_STORAGE_KEY);
@@ -42,11 +42,11 @@
         widget.dataset.publicKey = "public_key_b16031bf6fd0c0d9f2be9";
         widget.dataset.agentId = "agent_75c854665db40f81ec86c5ba82";
         widget.dataset.agentVersion = "21";
-        widget.dataset.title = "PoppersGuyPH Concierge";
+        widget.dataset.title = "deluLubes Concierge";
         widget.dataset.logoUrl =
-          "https://raw.githubusercontent.com/jcitservices-ai/delulubes/main/poppersguyph/assets/pgphlogo.png";
-        widget.dataset.color = "#f4c542";
-        widget.dataset.botName = "PoppersGuyPH Concierge";
+          "https://github.com/jcitservices-ai/delulubes/blob/main/product%20images/delulogo.webp?raw=true";
+        widget.dataset.color = "#ff72c6";
+        widget.dataset.botName = "deluLubes Concierge";
         widget.dataset.popupMessage = "Need support or order follow-up?";
         widget.dataset.showAiPopup = "false";
         widget.dataset.autoOpen = "false";
@@ -141,8 +141,7 @@
               <label class="field">
                 <span>Delivery Method</span>
                 <select name="delivery_method">
-                  <option value="Lalamove">Pay Lalamove with Bill</option>
-                  <option value="Lalamove Self-Paid">I Will Pay Lalamove</option>
+                  <option value="Lalamove">Same-day Lalamove</option>
                   <option value="Standard">Standard</option>
                 </select>
               </label>
@@ -178,7 +177,7 @@
                 </article>
               </div>
               <p class="field-hint">
-                For E-Wallet and Bank Transfer, upload your payment screenshot before placing the order. Choose *Pay Lalamove with Bill* if you want same-day Lalamove added to your order total. Choose *I Will Pay Lalamove* if you will handle the rider payment separately, and no Lalamove fee will be added to the bill. Cash on Delivery adds PHP 50.
+                For E-Wallet and Bank Transfer, upload your payment screenshot before placing the order. Same-day Lalamove is charged inside the final bill, so there is no separate rider payment for prepaid orders. Cash on Delivery adds PHP 50 and is the only same-day option where payment is collected on delivery.
               </p>
             </section>
             <div class="checkout-actions">
@@ -209,10 +208,10 @@
           Order number: <strong id="order-success-number">-</strong>
         </p>
         <div class="order-success__referral">
-          <p class="order-success__copy">Refer a friend with code: <strong id="own-referral-code">PGPH-000000</strong></p>
+          <p class="order-success__copy">Refer a friend with code: <strong id="own-referral-code">DELU-000000</strong></p>
           <button id="copy-referral" class="cta cta--secondary" type="button">Copy Referral Code</button>
         </div>
-        <a id="order-success-track-link" class="cta cta--primary" href="/poppers/track">Track Order</a>
+        <a id="order-success-track-link" class="cta cta--primary" href="/delu/track">Track Order</a>
         <button class="cta cta--secondary" type="button" data-order-success-close>Continue shopping</button>
       </div>
     </div>
