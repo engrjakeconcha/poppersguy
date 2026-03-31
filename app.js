@@ -1,5 +1,3 @@
-const API_BASE = "https://jakeconcha.pythonanywhere.com/api/catalog";
-
 const STORES = {
   delu: {
     slug: "delu",
@@ -485,7 +483,9 @@ function renderProducts() {
       product.description || "No description yet.";
     node.querySelector(".product-card__price").textContent = peso(product.price);
     const actionButton = node.querySelector(".product-card__button");
-    actionButton.addEventListener("click", () => upsertCartItem(product));
+    if (actionButton) {
+      actionButton.addEventListener("click", () => upsertCartItem(product));
+    }
     grid.appendChild(node);
   });
 }
@@ -1451,7 +1451,11 @@ function updateMeta() {
 }
 
 async function loadCatalog() {
-  const response = await fetch(`${API_BASE}/${state.store.slug}`);
+  const response = await fetch(`/api/storefront/${state.store.slug}-checkout`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "get_catalog", store: state.store.slug }),
+  });
   if (!response.ok) {
     throw new Error(`Failed to load ${state.store.slug} catalog`);
   }
